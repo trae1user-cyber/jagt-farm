@@ -50,7 +50,7 @@ JF.Views.Rules = (function () {
     wrap.appendChild(JF.Utils.el("div", { class: "card", style: "margin-top:16px" }, [
       JF.Utils.el("h3", { style: "margin:0 0 6px" }, "How this drives the farm"),
       JF.Utils.el("p", { class: "field__hint", style: "margin:0" },
-        "Entries are saved (MongoDB through the farm API, or this device) → active rules are matched against the animal and its records → Rule_Parameters and any animal Rule_Overrides decide the real value → the engine produces reminders, calculations and alerts → they appear on the dashboard, the reminders list and the animal's timeline. Change a value in the database and the website follows, with no code change."),
+        "Entries are saved to the farm database (MongoDB through the farm API, or this device) → active rules are matched against the animal and its records → Rule_Parameters and any animal Rule_Overrides decide the real value → the engine produces reminders, calculations and alerts → they appear on the dashboard, the reminders list and the animal's timeline. Change a value in the rulebook — the Google Sheet tabs or the database — and the website follows, with no code change."),
       JF.Utils.el("div", { class: "field__hint", style: "margin-top:8px" },
         `Value layering: rule default < farm parameter < animal override.  Currently reading from: ${s.source}.`),
     ]));
@@ -63,19 +63,19 @@ JF.Views.Rules = (function () {
     };
 
     // Persistence card: shows where the config is saved and lets the user push
-    // this device's configuration into the database explicitly.
+    // this device's configuration into the rulebook home explicitly.
     const mirrorLine = JF.Utils.el("p", { class: "field__hint", style: "margin:0", id: "rules-mirror-status" }, "Checking where your rules are saved...");
-    const pushBtn = JF.Utils.el("button", { class: "btn btn--accent btn--sm", type: "button" }, "⬆️ Push rules to MongoDB");
+    const pushBtn = JF.Utils.el("button", { class: "btn btn--accent btn--sm", type: "button" }, "⬆️ Push rules to the rulebook home");
     pushBtn.onclick = run(pushBtn, async () => {
       const r = await JF.RuleEngine.syncFromMirror();
-      msg(status, `Pushed your rule configuration to the database (~${r.rules} rule row(s), ~${r.params} parameter row(s) updated). Every device loads these on next load.`);
-      JF.Toast.show("Rule configuration pushed to MongoDB.", "success");
+      msg(status, `Pushed your rule configuration to the rulebook home (~${r.rules} rule row(s), ~${r.params} parameter row(s) written). Every device loads these on next load.`);
+      JF.Toast.show("Rule configuration pushed to the rulebook home.", "success");
       render(["overview"]);
     });
     wrap.appendChild(JF.Utils.el("div", { class: "card", style: "margin-top:16px" }, [
       JF.Utils.el("h3", { style: "margin:0 0 6px" }, "💾 Where your rules are saved"),
       JF.Utils.el("p", { class: "field__hint", style: "margin:0" },
-        "Every toggle, lead time, parameter and override you change is written into MongoDB the moment you save it (Rules / Rule_Parameters / Rule_Overrides collections). After a refresh — or on your phone and PC together — the app loads the configuration back from the database, so MongoDB is the single home of your rules. Edits made directly in Atlas are picked up when you return to this tab, or with Reload from Database above."),
+        "HYBRID SETUP: your farm DATA (animals, milk, expenses...) lives in MongoDB, while the RULES live in the three tabs of your Google Sheet rulebook (Rules / Rule_Parameters / Rule_Overrides) when its URL is set in Settings. Every toggle, lead time, parameter and override you change here is written straight into the sheet, and edits you make directly in the Sheet appear in the app on the next visit to this tab. No sheet connected? The rules then live with the database/device like before."),
       mirrorLine,
       JF.Utils.el("div", { style: "margin-top:10px" }, [pushBtn]),
     ]));
@@ -101,7 +101,7 @@ JF.Views.Rules = (function () {
       const clip = ["=== Rules ===", rulesTsv, "", "=== Rule_Parameters ===", paramsTsv, "",
         "=== How to use ===",
         "This copy is for review or backup: paste into any spreadsheet to audit the rulebook.",
-        "The live source of truth is MongoDB (Settings -> Farm API URL); the app reads rules from there when connected.",
+        "The live source of truth is the rulebook home - the Google Sheet tabs when connected, otherwise the farm database.",
       ].join("\n");
       try { await navigator.clipboard.writeText(clip); } catch (e) {
         const ta = document.createElement("textarea");
@@ -115,7 +115,7 @@ JF.Views.Rules = (function () {
     wrap.appendChild(JF.Utils.el("div", { class: "card", style: "margin-top:16px" }, [
       JF.Utils.el("h3", { style: "margin:0 0 6px" }, "📄 Export the rulebook"),
       JF.Utils.el("p", { class: "field__hint", style: "margin:0" },
-        "Copy the complete rulebook (rules, parameters) as tab-separated text - open any spreadsheet and paste to review, print or back it up. The live source of truth is your MongoDB database, which the app reads whenever the farm API URL is configured in Settings."),
+        "Copy the complete rulebook (rules, parameters) as tab-separated text - open any spreadsheet and paste to review, print or back it up. The live source of truth is your rulebook home: the Google Sheet tabs when connected, otherwise the farm database."),
       JF.Utils.el("div", { style: "margin-top:10px" }, [tsvBtn]),
       tsvLine,
     ]));
@@ -127,7 +127,7 @@ JF.Views.Rules = (function () {
       render(["rules"]);
     });
 
-    const reloadBtn = JF.Utils.el("button", { class: "btn btn--ghost btn--sm", type: "button" }, "Reload from Database");
+    const reloadBtn = JF.Utils.el("button", { class: "btn btn--ghost btn--sm", type: "button" }, "🔄 Reload from Sheet/Database");
     reloadBtn.onclick = run(reloadBtn, async () => {
       const r = await JF.RuleEngine.load();
       msg(status, `Loaded ${r.rules} rules, ${r.params} parameters, ${r.overrides} overrides from ${r.source}.`);
@@ -159,16 +159,15 @@ JF.Views.Rules = (function () {
         cats.map(([c, n]) => JF.Utils.el("span", { class: "badge badge--info" }, `${c} · ${n}`))),
     ]));
 
-    // Where is this device's configuration saved? (Connected mode: the backend is
-    // the home; the local copy is a cache. Mock mode: this device IS the storage.)
+    // Where do the rules live right now? (HYBRID: sheet when configured, else
+    // the data backend; mock device store when nothing is connected.)
     try {
-      const backend = JF.Store.getConfig("backend") || "mock";
-      const adapter = JF.Store.getAdapter();
-      const live = backend !== "mock" && adapter && !adapter.isPlaceholder;
       const m = await JF.RuleEngine.mirrorStatus();
-      if (mirrorLine) mirrorLine.textContent = live
-        ? `Backend is LIVE — rules save to the Rules / Rule_Parameters / Rule_Overrides collections as you edit. Local device copy: ${m.rules} rule row(s), ${m.params} parameter row(s).`
-        : `Offline/local mode — your edits persist on this device (${m.rules} rule row(s), ${m.params} parameter row(s) cached). Connect the backend in Settings to share them across devices.`;
+      if (mirrorLine) mirrorLine.textContent = m.home === "sheet"
+        ? `HYBRID LIVE — farm data in the database, rules read/written to the Google Sheet tabs (${m.rules} rule row(s), ${m.params} parameter row(s) visible). Sheet edits load here on tab focus or with Reload.`
+        : m.home === "mongo"
+          ? `Rules live in MongoDB (no Sheet URL configured yet) - ${m.rules} rule row(s), ${m.params} parameter row(s). Add the Google Sheet rulebook in Settings to edit rules like a spreadsheet.`
+          : `Offline/local mode — your edits persist on this device (${m.rules} rule row(s), ${m.params} parameter row(s)). Connect the database and the Google Sheet rulebook in Settings to share them across devices.`;
     } catch (e) { if (mirrorLine) mirrorLine.textContent = ""; }
     return wrap;
   };
@@ -223,7 +222,7 @@ JF.Views.Rules = (function () {
       [JF.Utils.el("option", { value: "" }, "All categories")].concat(cats.map((c) => JF.Utils.el("option", { value: c }, c))));
     select.onchange = () => { filter = select.value; draw(); };
     wrap.appendChild(JF.Utils.el("div", { class: "page__head-row" }, [select]));
-    wrap.appendChild(JF.Utils.el("p", { class: "field__hint" }, "Turn a rule off to stop it generating new reminders (history is kept). Lead time is the number of days before the due date that the reminder appears. Every toggle and lead time is saved into the Rules sheet, so it survives refreshes and shows on your phone and PC alike."));
+    wrap.appendChild(JF.Utils.el("p", { class: "field__hint" }, "Turn a rule off to stop it generating new reminders (history is kept). Lead time is the number of days before the due date that the reminder appears. Every toggle and lead time is saved into the rulebook home (Google Sheet tabs or database), so it survives refreshes and shows on your phone and PC alike."));
     wrap.appendChild(host);
     draw();
     return wrap;
@@ -253,7 +252,7 @@ JF.Views.Rules = (function () {
         ]);
       })),
     ]);
-    wrap.appendChild(JF.Utils.el("p", { class: "field__hint" }, "These are the biological and farm-protocol values the rules read. Change 90 → 120 here (or in the Rule_Parameters sheet) and every rule using it follows, with no code change."));
+    wrap.appendChild(JF.Utils.el("p", { class: "field__hint" }, "These are the biological and farm-protocol values the rules read. Change 90 → 120 here (or directly in the Rule_Parameters tab of the Google Sheet) and every rule using it follows, with no code change."));
     wrap.appendChild(status);
     wrap.appendChild(JF.Utils.el("div", { class: "table-wrap" }, [table]));
     return wrap;
@@ -348,7 +347,7 @@ JF.Views.Rules = (function () {
         JF.Utils.el("div", { class: "eyebrow" }, "🧠 Rule engine"),
         JF.Utils.el("h1", { class: "page__title", style: { marginTop: "8px" } }, SUB[sub]?.label || "Rule Engine"),
         JF.Utils.el("p", { class: "page__sub", style: { marginTop: "var(--space-2)" } },
-          "The farm's own rules, stored in your MongoDB database: entries are matched against them to produce reminders, calculations and alerts."),
+          "The farm's own rules, stored in your Google Sheet rulebook (or the database until a sheet is connected): entries are matched against them to produce reminders, calculations and alerts."),
       ]),
     ]));
     page.appendChild(subNav(sub));

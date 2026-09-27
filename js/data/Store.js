@@ -1,13 +1,58 @@
 JF.Store = (function () {
   let adapter;
+  let dataAdapter; // farm DATA adapter (MongoDB farm API or the local mock)
+  let sheetAdapter; // rulebook adapter (Google Sheet) - always present
   let backend = "mock";
   let bridged = false; // set true once app.js bridges events to the CascadeEngine
+
+  /**
+   * HYBRID BACKEND: farm data (animals, heat, milk, expenses, reminders...)
+   * lives in the data adapter (MongoDB through the farm API, or this device),
+   * while the three rule entities (Rules / Rule_Parameters / Rule_Overrides)
+   * are routed to the Google Sheet rulebook console when its URL is configured
+   * in Settings. With no sheet configured, rule entities transparently fall
+   * through to the data adapter, so offline behaviour is unchanged.
+   */
+  const RULE_ENTITIES = new Set(["rules", "ruleParameters", "ruleOverrides"]);
+  const makeComposite = (data, sheet) => {
+    const routed = (entity) => (RULE_ENTITIES.has(entity) ? sheet : data);
+    return {
+      // Identity/behaviour used by views and the RuleEngine
+      isPlaceholder: data.isPlaceholder,
+      get dataBackend() { return data; },
+      get sheetBackend() { return sheet; },
+      // CRUD is routed per entity
+      list: (entity) => routed(entity).list(entity),
+      get: (entity, id) => routed(entity).get(entity, id),
+      create: (entity, rec) => routed(entity).create(entity, rec),
+      update: (entity, id, patch) => routed(entity).update(entity, id, patch),
+      delete: (entity, id) => routed(entity).delete(entity, id),
+      // Whole-store operations stay with the DATA adapter (never wipe the sheet)
+      seed: (d) => data.seed(d),
+      clear: () => data.clear(),
+      exportBackup: () => data.exportBackup ? data.exportBackup() : Promise.reject(new Error("not supported")),
+      // Diagnostics for both halves
+      testConnection: () => data.testConnection(),
+      verify: () => data.verify ? data.verify() : Promise.reject(new Error("not supported")),
+      testRuleSheet: () => sheet.testConnection(),
+      verifyRuleSheet: () => sheet.verify(),
+      // Bulk rule installs still make sense on both sides (the sheet adapter
+      // falls through to data when no sheet URL is set)
+      seedRules: (payload) => sheet.seedRules(payload),
+      syncRules: (payload) => sheet.syncRules(payload),
+      // Event bus (events flow through the data adapter like before)
+      on: (...a) => data.on(...a),
+      emit: (...a) => data.emit(...a),
+    };
+  };
 
   const init = (type) => {
     const savedType = type || localStorage.getItem("jf_backend") || "mock";
     backend = savedType;
-    if (savedType === "mongo") adapter = new JF.Data.MongoApiAdapter();
-    else adapter = new JF.Data.MockAdapter();
+    if (savedType === "mongo") dataAdapter = new JF.Data.MongoApiAdapter();
+    else dataAdapter = new JF.Data.MockAdapter();
+    sheetAdapter = new JF.Data.SheetRulesAdapter(dataAdapter);
+    adapter = makeComposite(dataAdapter, sheetAdapter);
     return adapter;
   };
 
@@ -15,7 +60,17 @@ JF.Store = (function () {
   const markBridged = () => { bridged = true; };
 
   const getAdapter = () => adapter;
-  const setBackend = (type) => init(type);
+  const setBackend = (type) => init(type); // rebuilds both halves (sheet URL/token live in localStorage)
+  /** Configure the Google Sheet rulebook console (Settings -> Rulebook). */
+  const configureRuleSheet = ({ endpoint, token } = {}) => {
+    if (!sheetAdapter) return;
+    sheetAdapter.configure({ endpoint, token });
+  };
+  const getRuleSheetAdapter = () => sheetAdapter;
+  /** Which adapter actually holds a given entity right now (for UI hints). */
+  const homeOf = (entity) => (RULE_ENTITIES.has(entity) && sheetAdapter && sheetAdapter._live()
+    ? "sheet"
+    : (backend === "mongo" && dataAdapter && !dataAdapter.isPlaceholder ? "mongo" : "device"));
   const on = (...a) => adapter.on(...a);
   const emit = (...a) => adapter.emit(...a);
 
@@ -83,6 +138,7 @@ JF.Store = (function () {
   const api = {
     init, setBackend, getAdapter, on, emit, bus, stats, seed, clearAll, eraseRecords,
     isBridged, markBridged, forceReseed, consumeForceSeed, getConfig, setConfig,
+    configureRuleSheet, getRuleSheetAdapter, homeOf,
     animals: wrapEntity("animals"),
     heat: wrapEntity("heat"),
     insemination: wrapEntity("insemination"),

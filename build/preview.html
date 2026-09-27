@@ -3151,16 +3151,229 @@ JF.Data.MongoApiAdapter = (function () {
 
 </script>
   <script>
+JF.Data = JF.Data || {};
+
+/**
+ * SheetRulesAdapter - talks to the farm's Google Apps Script web app.
+ *
+ * The HYBRID split: MongoDB holds the farm DATA (animals, milk, expenses...),
+ * while a Google Spreadsheet is the easy-to-edit RULE/ADMIN system. This
+ * adapter serves ONLY the three rule entities - Rules, Rule_Parameters,
+ * Rule_Overrides - which live as three tabs the owner can edit like a
+ * spreadsheet. Store.js routes those entities here; everything else keeps
+ * going to the data backend.
+ *
+ *   POST {sheetUrl}  { action, payload, token }  ->  { success, data | error }
+ *   Actions: ping | verify | list | get | create | update | delete | seedRules
+ *
+ * Graceful layers:
+ *   - Sheet URL configured  -> the three tabs ARE the rulebook (source of truth).
+ *   - No URL (stub mode)    -> every call falls through to the data adapter
+ *     (MongoDB/mock), so rule toggles keep persisting exactly as before and
+ *     connecting a sheet later simply lifts the rows into the cloud.
+ */
+JF.Data.SheetRulesAdapter = (function () {
+
+  const RULE_ENTITIES = ["rules", "ruleParameters", "ruleOverrides"];
+
+  class SheetRulesAdapter extends JF.Data.MongoApiAdapter {
+    /**
+     * @param {object} fallback data adapter used while no sheet URL is set
+     *        (usually the MockAdapter instance the store was opened with).
+     */
+    constructor(fallback = null) {
+      super();
+      this.fallback = fallback;
+      const stored = (() => { try { return localStorage.getItem("jf_rules_endpoint"); } catch (e) { return null; } })();
+      this.endpoint = stored || "";
+      this.token = (() => { try { return localStorage.getItem("jf_rules_token") || ""; } catch (e) { return ""; } })();
+      this.lastStatus = null;
+      this.isPlaceholder = !this._isRealEndpoint();
+    }
+
+    configure({ endpoint, token } = {}) {
+      if (endpoint !== undefined) { this.endpoint = endpoint; try { localStorage.setItem("jf_rules_endpoint", endpoint); } catch (e) {} }
+      if (token !== undefined) { this.token = token; try { localStorage.setItem("jf_rules_token", token); } catch (e) {} }
+      this.isPlaceholder = !this._isRealEndpoint();
+    }
+
+    _live() { return this._isRealEndpoint(); }
+    _fb() { return this.fallback || null; }
+
+    async _call(action, payload = {}) {
+      try {
+        const res = await fetch(this.endpoint, {
+          method: "POST",
+          redirect: "follow", // Apps Script redirects to googleusercontent.com
+          headers: { "Content-Type": "text/plain;charset=utf-8" }, // avoids a CORS preflight Apps Script cannot answer
+          body: JSON.stringify({ action, payload, token: this.token || "" }),
+        });
+        const text = await res.text();
+        let json;
+        try { json = JSON.parse(text); }
+        catch (parseErr) {
+          if (/<\s*(!doctype|html|body)/i.test(text)) throw new Error("The rulebook URL answered with a web page instead of JSON - paste the /exec URL of the Apps Script Web app deployment.");
+          throw new Error("The rulebook URL answered with something the app cannot read (status " + res.status + ").");
+        }
+        if (!json.success) throw new Error(json.error || "Rulebook sheet call failed");
+        return json.data;
+      } catch (err) {
+        console.error(`[SheetRules:${action}]`, err);
+        throw err;
+      }
+    }
+
+    /* ---------------- entity CRUD (with data-store fallback) ---------------- */
+
+    async list(entity) {
+      if (!RULE_ENTITIES.includes(entity)) return [];
+      if (!this._live()) return this._fb() ? this._fb().list(entity) : [];
+      return this._call("list", { entity }) || [];
+    }
+
+    async get(entity, id) {
+      if (!RULE_ENTITIES.includes(entity)) return null;
+      if (!this._live()) return this._fb() ? this._fb().get(entity, id) : null;
+      return this._call("get", { entity, id });
+    }
+
+    async create(entity, data) {
+      if (!RULE_ENTITIES.includes(entity)) throw new Error(`${entity} lives in the farm database, not the rulebook sheet`);
+      if (!this._live()) {
+        const r = await this._fb().create(entity, data);
+        this.emit(`${entity}:created`, r); this.emit("change", { entity, action: "create", record: r });
+        return r;
+      }
+      const r = await this._call("create", { entity, data });
+      this.emit(`${entity}:created`, r);
+      this.emit("change", { entity, action: "create", record: r });
+      return r;
+    }
+
+    async update(entity, id, patch) {
+      if (!RULE_ENTITIES.includes(entity)) throw new Error(`${entity} lives in the farm database, not the rulebook sheet`);
+      if (!this._live()) {
+        const r = await this._fb().update(entity, id, patch);
+        this.emit(`${entity}:updated`, r); this.emit("change", { entity, action: "update", id, record: r });
+        return r;
+      }
+      const r = await this._call("update", { entity, id, patch });
+      this.emit(`${entity}:updated`, r);
+      this.emit("change", { entity, action: "update", id, record: r });
+      return r;
+    }
+
+    async delete(entity, id) {
+      if (!RULE_ENTITIES.includes(entity)) throw new Error(`${entity} lives in the farm database, not the rulebook sheet`);
+      if (!this._live()) {
+        const r = await this._fb().delete(entity, id);
+        this.emit(`${entity}:deleted`, r); this.emit("change", { entity, action: "delete", id });
+        return r;
+      }
+      const r = await this._call("delete", { entity, id });
+      this.emit(`${entity}:deleted`, r);
+      this.emit("change", { entity, action: "delete", id });
+      return r;
+    }
+
+    /** Install the built-in rulebook into the sheet's three tabs (upsert mode). */
+    async seedRules(book) {
+      const src = book || (JF.RuleBook && JF.RuleBook.seedPayload()) || {};
+      const body = {
+        rules: src.rules || [],
+        params: src.ruleParameters || src.params || src.parameters || [],
+        overrides: src.overrides || [],
+        upsert: true,
+      };
+      if (!this._live()) return this._fb().seedRules ? this._fb().seedRules(body) : {};
+      return this._call("seedRules", body);
+    }
+
+    async syncRules(book) { return this.seedRules(book); }
+
+    /* ------------------------------ diagnostics ----------------------------- */
+
+    /** Ping the rulebook sheet: document name + row counts per tab. */
+    async testConnection() {
+      if (!this._live()) throw new Error("No Rulebook Google Sheet URL configured yet. Create the sheet (see RULEBOOK-SHEET-SETUP.md) and paste its /exec URL.");
+      const status = await this._call("ping");
+      this.lastStatus = status;
+      return status;
+    }
+
+    /** Write/read round trip inside the sheet's Admin tab. */
+    async verify() {
+      if (!this._live()) throw new Error("Configure the Rulebook Google Sheet URL first.");
+      const res = await this._call("verify");
+      this.lastStatus = res;
+      return res;
+    }
+
+    /** Backups and file storage stay with the farm data in MongoDB. */
+    async exportBackup() { throw new Error("Backup is served by the MongoDB farm API, not the rulebook sheet."); }
+    async uploadFile() { throw new Error("Files upload to the MongoDB farm API, not the rulebook sheet."); }
+  }
+
+  return SheetRulesAdapter;
+})();
+
+</script>
+  <script>
 JF.Store = (function () {
   let adapter;
+  let dataAdapter; // farm DATA adapter (MongoDB farm API or the local mock)
+  let sheetAdapter; // rulebook adapter (Google Sheet) - always present
   let backend = "mock";
   let bridged = false; // set true once app.js bridges events to the CascadeEngine
+
+  /**
+   * HYBRID BACKEND: farm data (animals, heat, milk, expenses, reminders...)
+   * lives in the data adapter (MongoDB through the farm API, or this device),
+   * while the three rule entities (Rules / Rule_Parameters / Rule_Overrides)
+   * are routed to the Google Sheet rulebook console when its URL is configured
+   * in Settings. With no sheet configured, rule entities transparently fall
+   * through to the data adapter, so offline behaviour is unchanged.
+   */
+  const RULE_ENTITIES = new Set(["rules", "ruleParameters", "ruleOverrides"]);
+  const makeComposite = (data, sheet) => {
+    const routed = (entity) => (RULE_ENTITIES.has(entity) ? sheet : data);
+    return {
+      // Identity/behaviour used by views and the RuleEngine
+      isPlaceholder: data.isPlaceholder,
+      get dataBackend() { return data; },
+      get sheetBackend() { return sheet; },
+      // CRUD is routed per entity
+      list: (entity) => routed(entity).list(entity),
+      get: (entity, id) => routed(entity).get(entity, id),
+      create: (entity, rec) => routed(entity).create(entity, rec),
+      update: (entity, id, patch) => routed(entity).update(entity, id, patch),
+      delete: (entity, id) => routed(entity).delete(entity, id),
+      // Whole-store operations stay with the DATA adapter (never wipe the sheet)
+      seed: (d) => data.seed(d),
+      clear: () => data.clear(),
+      exportBackup: () => data.exportBackup ? data.exportBackup() : Promise.reject(new Error("not supported")),
+      // Diagnostics for both halves
+      testConnection: () => data.testConnection(),
+      verify: () => data.verify ? data.verify() : Promise.reject(new Error("not supported")),
+      testRuleSheet: () => sheet.testConnection(),
+      verifyRuleSheet: () => sheet.verify(),
+      // Bulk rule installs still make sense on both sides (the sheet adapter
+      // falls through to data when no sheet URL is set)
+      seedRules: (payload) => sheet.seedRules(payload),
+      syncRules: (payload) => sheet.syncRules(payload),
+      // Event bus (events flow through the data adapter like before)
+      on: (...a) => data.on(...a),
+      emit: (...a) => data.emit(...a),
+    };
+  };
 
   const init = (type) => {
     const savedType = type || localStorage.getItem("jf_backend") || "mock";
     backend = savedType;
-    if (savedType === "mongo") adapter = new JF.Data.MongoApiAdapter();
-    else adapter = new JF.Data.MockAdapter();
+    if (savedType === "mongo") dataAdapter = new JF.Data.MongoApiAdapter();
+    else dataAdapter = new JF.Data.MockAdapter();
+    sheetAdapter = new JF.Data.SheetRulesAdapter(dataAdapter);
+    adapter = makeComposite(dataAdapter, sheetAdapter);
     return adapter;
   };
 
@@ -3168,7 +3381,17 @@ JF.Store = (function () {
   const markBridged = () => { bridged = true; };
 
   const getAdapter = () => adapter;
-  const setBackend = (type) => init(type);
+  const setBackend = (type) => init(type); // rebuilds both halves (sheet URL/token live in localStorage)
+  /** Configure the Google Sheet rulebook console (Settings -> Rulebook). */
+  const configureRuleSheet = ({ endpoint, token } = {}) => {
+    if (!sheetAdapter) return;
+    sheetAdapter.configure({ endpoint, token });
+  };
+  const getRuleSheetAdapter = () => sheetAdapter;
+  /** Which adapter actually holds a given entity right now (for UI hints). */
+  const homeOf = (entity) => (RULE_ENTITIES.has(entity) && sheetAdapter && sheetAdapter._live()
+    ? "sheet"
+    : (backend === "mongo" && dataAdapter && !dataAdapter.isPlaceholder ? "mongo" : "device"));
   const on = (...a) => adapter.on(...a);
   const emit = (...a) => adapter.emit(...a);
 
@@ -3236,6 +3459,7 @@ JF.Store = (function () {
   const api = {
     init, setBackend, getAdapter, on, emit, bus, stats, seed, clearAll, eraseRecords,
     isBridged, markBridged, forceReseed, consumeForceSeed, getConfig, setConfig,
+    configureRuleSheet, getRuleSheetAdapter, homeOf,
     animals: wrapEntity("animals"),
     heat: wrapEntity("heat"),
     insemination: wrapEntity("insemination"),
@@ -4193,12 +4417,13 @@ window.JF = window.JF || {};
  *
  * Persistence (why edits survive a refresh on any device):
  *   Every edit (rule toggle, lead time, parameter value, override) is written
- *   THROUGH into the data store. With MongoDB as the backend that means the
- *   Rules / Rule_Parameters / Rule_Overrides tabs are altered in place, so the
- *   website and the sheet always agree and every device picks the change up on
- *   its next load (boot, or the moment the tab is refocused). On boot the sheets
- *   are read FIRST and the built-in rulebook only fills rows the sheet has never
- *   seen - so the sheet, not the code, is the source of truth once connected.
+ *   THROUGH into the rulebook home - the three entities Rules / Rule_Parameters /
+ *   Rule_Overrides, which the store routes to the Google Sheet rule console when
+ *   its URL is configured (HYBRID: MongoDB holds the farm DATA, the Sheet holds
+ *   the RULES), and to MongoDB/this device otherwise. Every device picks changes
+ *   up on its next load (boot, or the moment the tab is refocused). On boot the
+ *   stored rows are read FIRST and the built-in rulebook only fills rows the home
+ *   has never seen - so the rulebook home, not the code, is the source of truth.
  */
 JF.RuleEngine = (function () {
 
@@ -4222,34 +4447,16 @@ JF.RuleEngine = (function () {
   /* ------------------------------------------------------------------ */
 
   /**
-   * Mirror configuration rows into the STORE (never the live adapter), so with
-   * MongoDB as the backend they are written to the Rules / Rule_Parameters /
-   * Rule_Overrides tabs. This is what makes a change survive a refresh and reach
-   * every other device; in mock mode it simply persists on the device.
+   * There is no secondary mirror: the store routes the three rule entities to
+   * their home (Google Sheet when configured, else the data adapter), so one
+   * write-through is the whole story. See Store.js makeComposite().
    */
-  const mirrorToSheet = async (records) => {
-    if (!records || !records.length) return 0;
-    const store = new (JF.Data.MockAdapter)();
-    let written = 0;
-    for (const rec of records) {
-      const entity = rec.RuleID !== undefined ? "rules" : rec.ParameterID !== undefined ? "ruleParameters" : "ruleOverrides";
-      const id = String(rec.id || rec.RuleID || rec.ParameterID || rec.OverrideID || "");
-      if (!id) continue;
-      const payload = { ...rec, id };
-      try {
-        const existing = await store.get(entity, id);
-        if (existing) await store.update(entity, id, payload);
-        else { await store.create(entity, payload); written++; }
-      } catch (e) { console.warn("[RuleEngine] mirror:", entity, id, e.message); }
-    }
-    return written;
-  };
 
   const load = async () => {
     const book = BOOK();
-    // Built-in rulebook is the default LAYER; every row present in the sheets
-    // (or the local store) overrides it. Partial installs and single-row edits
-    // therefore never drop the rest of the configuration.
+    // Built-in rulebook is the default LAYER; every row present in the rulebook
+    // home (Google Sheet tabs, MongoDB collections or the device store) overrides
+    // it. Partial installs and single-row edits therefore never drop the rest.
     const merge = (base, overlay, key) => {
       const map = new Map();
       base.forEach((x) => map.set(String(x[key]), { ...x }));
@@ -4260,22 +4467,29 @@ JF.RuleEngine = (function () {
       });
       return [...map.values()];
     };
-    let sheetRules = 0, sheetParams = 0, mirrored = 0, autoInstalled = 0;
+    let sheetRules = 0, sheetParams = 0, autoInstalled = 0;
     try {
       const [rRows, pRows, oRows] = await Promise.all([
         JF.Store.rules.list(), JF.Store.ruleParameters.list(), JF.Store.ruleOverrides.list(),
       ]);
-      // First connection: the rule tabs exist but are empty. Install the built-in
-      // rulebook once and mirror it, so the SHEET becomes the home of the config
-      // from day one and every later device boots from the same rows.
+      // First connection: the rulebook home exists but is empty. Install the
+      // built-in rulebook once, so the home (sheet tabs or database collections)
+      // becomes the source of truth from day one and every later device boots
+      // from the same rows. Bulk seed where available (sheet/Mongo), else one
+      // create per row through the store.
       if (!(rRows || []).length && !(pRows || []).length) {
         try {
           // A remote backend with a bulk seed gets one server call; otherwise rows
           // are created one by one through the store.
           const ad = JF.Store.getAdapter();
-          const res = (ad && typeof ad.seedRules === "function" && !ad.isPlaceholder)
-            ? await (async () => { const s = await ad.seedRules(BOOK().seedPayload()); return { rules: (s.rules && (s.rules.added || s.rules.updated)) || 0, params: (s.parameters && (s.parameters.added || s.parameters.updated)) || 0 }; })()
-            : await installDefaults();
+          let res = null;
+          if (ad && typeof ad.seedRules === "function") {
+            const s = await ad.seedRules(BOOK().seedPayload());
+            res = { rules: (s && s.rules && (s.rules.added || s.rules.updated)) || 0, params: (s && s.parameters && (s.parameters.added || s.parameters.updated)) || 0 };
+          }
+          // A home without a bulk seed (device store, or a cold sheet fallback)
+          // reports zero counts: install row-by-row through the store instead.
+          if (!res || (!res.rules && !res.params)) res = await installDefaults();
           autoInstalled = (res.rules || 0) + (res.params || 0);
           const [r2, p2] = await Promise.all([JF.Store.rules.list(), JF.Store.ruleParameters.list()]);
           rRows.splice(0, rRows.length, ...r2);
@@ -4288,25 +4502,19 @@ JF.RuleEngine = (function () {
       params = Object.fromEntries(mergedParams.map((x) => [String(x.ParameterID), x]));
       sheetParams = (pRows || []).length;
       overrides = (oRows || []).filter((x) => truthy(x.Active));
-      // Keep the local mirror warm in mock mode too, so switching backends later
-      // (mock -> MongoDB) carries the configuration the device already has.
-      if (autoInstalled) {
-        mirrored = await mirrorToSheet([
-          ...(rRows || []).map((x) => ({ ...x, Active: truthy(x.Active), id: x.id || x.RuleID })),
-          ...(pRows || []).map((x) => ({ ...x, id: x.id || x.ParameterID })),
-        ]);
-      }
     } catch (e) {
       console.warn("[RuleEngine] stored rule rows unreadable, using built-in rulebook:", e.message);
       rules = book.RULES.map((x) => ({ ...x }));
       params = book.paramMap();
       overrides = [];
     }
+    const home = (JF.Store.homeOf && JF.Store.homeOf("rules")) || "device";
+    const homeName = home === "sheet" ? "Google Sheet rulebook" : home === "mongo" ? "MongoDB" : "this device";
     loadSource = sheetRules || sheetParams
-      ? `database (${sheetRules} rule rows, ${sheetParams} parameter rows) overriding the built-in rulebook`
+      ? `${homeName} (${sheetRules} rule rows, ${sheetParams} parameter rows) overriding the built-in rulebook`
       : "built-in rulebook";
     loadedAt = new Date().toISOString();
-    return { rules: rules.length, params: Object.keys(params).length, overrides: overrides.length, source: loadSource, mirrored, autoInstalled };
+    return { rules: rules.length, params: Object.keys(params).length, overrides: overrides.length, source: loadSource, home, autoInstalled };
   };
 
   const ensureLoaded = async () => { if (!loadedAt) await load(); };
@@ -4327,20 +4535,13 @@ JF.RuleEngine = (function () {
       added++;
     }
     let addedP = 0;
-    const createdParams = [];
     for (const par of book.PARAMS) {
       if (haveP.has(par.ParameterID)) continue;
-      const rec = { ...par, id: par.ParameterID };
-      await JF.Store.ruleParameters.create(rec);
-      createdParams.push(rec);
+      await JF.Store.ruleParameters.create({ ...par, id: par.ParameterID });
       addedP++;
     }
-    // Mirror the NEWLY installed rows into the local mirror, so a later backend
-    // switch (mock <-> MongoDB) carries them. Only new rows: existing edits are
-    // never overwritten, exactly like the sheet-side install.
-    try { await mirrorToSheet([...createdRules, ...createdParams]); } catch (e) { console.warn("[RuleEngine] install mirror:", e.message); }
     await load();
-    await audit("install-rulebook", "Rules", "", `+${added} rules, +${addedP} parameters (persisted in the sheet)`);
+    await audit("install-rulebook", "Rules", "", `+${added} rules, +${addedP} parameters (persisted in the rulebook home)`);
     return { rules: added, params: addedP };
   };
 
@@ -4996,21 +5197,23 @@ JF.RuleEngine = (function () {
   };
 
   /* ------------------------------------------------------------------ */
-  /* Rule editing (writes back to the sheets)                            */
+  /* Rule editing (write-through to the rulebook home)                 */
   /* ------------------------------------------------------------------ */
 
   /**
-   * Every edit goes through the store so it lands in the database (mock
-   * backend: it persists on the device). The live adapter must NOT be touched -
-   * the engine listens to it and would re-enter itself.
+   * Every edit goes through the store, so it lands in the rulebook home - the
+   * Google Sheet tabs when configured, otherwise MongoDB or the device store.
+   * The engine reads through the same store, so it never talks to an adapter
+   * directly (that would re-enter itself via the change events).
    */
   const setRuleField = async (ruleId, field, value) => {
     const rule = rules.find((r) => String(r.RuleID) === String(ruleId));
     if (!rule) return null;
     const rec = { ...rule, [field]: value, id: rule.RuleID };
-    try { await mirrorToSheet([rec]); } catch (e) { console.warn("[RuleEngine] rule write-through:", e.message); }
-    if (rule.id) await JF.Store.rules.update(rule.id, { [field]: value });
-    else await JF.Store.rules.create(rec);
+    try {
+      if (rule.id) await JF.Store.rules.update(rule.id, { [field]: value });
+      else await JF.Store.rules.create(rec);
+    } catch (e) { console.warn("[RuleEngine] rule write-through:", e.message); }
     rule[field] = value;
     await audit("rule-updated", "Rules", ruleId, `${field} = ${value}`);
     return rule;
@@ -5023,10 +5226,6 @@ JF.RuleEngine = (function () {
       const base = BOOK().paramMap()[parameterId] || { ParameterID: parameterId, Parameter: parameterId, Unit: "Days", Active: true, Notes: "" };
       await JF.Store.ruleParameters.create({ ...base, Value: value, id: parameterId });
     }
-    const merged = paramRow(parameterId);
-    if (merged) {
-      try { await mirrorToSheet([{ ...merged, Value: value, id: parameterId }]); } catch (e) { console.warn("[RuleEngine] parameter write-through:", e.message); }
-    }
     await load();
     await audit("parameter-updated", "Rule_Parameters", parameterId, `= ${value}`);
     return true;
@@ -5038,19 +5237,16 @@ JF.RuleEngine = (function () {
       StartDate: today(), EndDate: "", Reason, ApprovedBy, Active: true,
     };
     await JF.Store.ruleOverrides.create({ ...rec, id: rec.OverrideID });
-    try { await mirrorToSheet([{ ...rec, id: rec.OverrideID }]); } catch (e) { console.warn("[RuleEngine] override write-through:", e.message); }
     overrides.push(rec);
     await audit("override-added", "Rule_Overrides", rec.OverrideID, `${RuleID} for ${AnimalID} = ${Value} ${Unit}`);
     return rec;
   };
 
-  /** Delete a per-animal override everywhere (store + sheet mirror). */
+  /** Delete a per-animal override (lives in the rulebook home). */
   const removeOverride = async (overrideId) => {
     await JF.Store.ruleOverrides.delete(overrideId);
-    const store = new (JF.Data.MockAdapter)();
-    try { await store.delete("ruleOverrides", String(overrideId)); } catch (e) {}
     await load();
-    await audit("override-removed", "Rule_Overrides", overrideId, "deleted from the app and the sheet");
+    await audit("override-removed", "Rule_Overrides", overrideId, "deleted from the rulebook home");
     return true;
   };
 
@@ -5066,34 +5262,37 @@ JF.RuleEngine = (function () {
   };
 
   /**
-   * Push this device's full rule configuration into MongoDB (update mode).
-   * Covers the reverse path of load(): rules edited while the device was offline,
-   * or a rulebook shipped with a newer app version, reach the sheet here. Existing
-   * sheet rows are updated field-by-field; rows the payload does not carry are kept.
+   * Push this device's full rule configuration into the rulebook home (update
+   * mode). Covers the reverse path of load(): rules edited while this device was
+   * offline, or a rulebook shipped with a newer app version, reach the home here.
+   * Existing rows are updated field-by-field; rows the payload does not carry are
+   * kept - so a farm-wide Sheet edit and a device edit can both survive.
    */
+  const listRules = () => rules.map((x) => ({ ...x }));
+  const listParams = () => Object.values(params).map((x) => ({ ...x }));
+
   const syncFromMirror = async () => {
     await ensureLoaded();
     const rulesRows = listRules().map((x) => ({ ...x, Active: truthy(x.Active), id: x.RuleID }));
     const paramRows = listParams().map((x) => ({ ...x, id: x.ParameterID }));
     let out = { rules: 0, params: 0 };
     const ad = JF.Store.getAdapter();
-    if (ad && typeof ad.syncRules === "function" && !ad.isPlaceholder) {
+    if (ad && typeof ad.syncRules === "function") {
       const res = await ad.syncRules({ rules: rulesRows, ruleParameters: paramRows, overrides: [] });
-      out = { rules: (res.rules && res.rules.updated) || 0, params: (res.parameters && res.parameters.updated) || 0 };
-    } else {
-      await mirrorToSheet([...rulesRows, ...paramRows]);
+      out = { rules: (res && res.rules && (res.rules.added || res.rules.updated)) || 0, params: (res && res.parameters && (res.parameters.added || res.parameters.updated)) || 0 };
     }
-    await audit("sync-rules-to-sheet", "Rules", "", `pushed config: ~${out.rules} rule row(s), ~${out.params} parameter row(s) updated`);
+    await load();
+    await audit("sync-rules-to-home", "Rules", "", `pushed config: ~${out.rules} rule row(s), ~${out.params} parameter row(s) written`);
     return out;
   };
 
-  /** How many config rows the local mirror currently holds (0 = mirror cold). */
+  /** Quick facts for the UI: where rules live and how rows are visible there. */
   const mirrorStatus = async () => {
     try {
-      const store = new (JF.Data.MockAdapter)();
-      const [r, p] = await Promise.all([store.list("rules"), store.list("ruleParameters")]);
-      return { rules: r.length, params: p.length };
-    } catch (e) { return { rules: 0, params: 0 }; }
+      const [r, p] = await Promise.all([JF.Store.rules.list(), JF.Store.ruleParameters.list()]);
+      const home = (JF.Store.homeOf && JF.Store.homeOf("rules")) || "device";
+      return { home, rules: r.length, params: p.length };
+    } catch (e) { return { home: "device", rules: 0, params: 0 }; }
   };
 
   const stats = () => ({
@@ -5112,8 +5311,7 @@ JF.RuleEngine = (function () {
     init: async () => { await load(); await evaluateAll(); return stats(); },
     load, ensureLoaded, focus, installDefaults, syncFromMirror, mirrorStatus, evaluateAll, evaluateAnimal, clearReminders, rebuild,
     explain, dataQuality, setRuleField, setParamValue, addOverride, removeOverride, stats, isEnabled,
-    listRules: () => rules.map((x) => ({ ...x })),
-    listParams: () => Object.values(params).map((x) => ({ ...x })),
+    listRules, listParams,
     resolveValue: (ruleId, animalId) => {
       const rule = rules.find((r) => String(r.RuleID) === String(ruleId));
       return rule ? resolve(rule, animalId) : null;
@@ -10718,6 +10916,84 @@ JF.Views.Settings = (function () {
       }
     }, "ðŸ©º Verify MongoDB API");
 
+    // ---- Rulebook Google Sheet (the hybrid: rules live in Sheets, data in Mongo) ----
+    const sheetInput = JF.Utils.el("input", {
+      class: "input",
+      id: "cfg-rules-endpoint",
+      type: "url",
+      placeholder: "https://script.google.com/macros/s/.../exec",
+      value: JF.Store.getConfig("rules_endpoint") || ""
+    });
+    const sheetStatus = JF.Utils.el("div", { id: "rules-sheet-status", style: "margin-top:8px;font-size:var(--fs-sm);color:var(--color-ink-500)" });
+    const sheetTestBtn = JF.Utils.el("button", {
+      class: "btn btn--ghost btn--sm",
+      type: "button",
+      onclick: async () => {
+        sheetStatus.textContent = "â³ Testing the rulebook sheet...";
+        sheetStatus.style.color = "var(--color-ink-500)";
+        const url = sheetInput.value.trim();
+        if (!url) {
+          sheetStatus.textContent = "âŒ Paste the /exec URL of the Apps Script Web app first (see RULEBOOK-SHEET-SETUP.md).";
+          sheetStatus.style.color = "var(--color-oxblood-700)";
+          return;
+        }
+        try {
+          const ad = new JF.Data.SheetRulesAdapter(null);
+          ad.configure({ endpoint: url, token: JF.Store.getConfig("rules_token") || "" });
+          const ping = await ad.testConnection();
+          sheetStatus.textContent = `âœ… Sheet connected: "${ping?.document || "rulebook"}" - Rules ${ping?.rules ?? "?"} rows, Parameters ${ping?.ruleParameters ?? "?"}, Overrides ${ping?.ruleOverrides ?? "?"}.`;
+          sheetStatus.style.color = "var(--color-success-700)";
+          JF.Toast?.show("Rulebook sheet connected!", "success");
+        } catch (err) {
+          sheetStatus.textContent = `âŒ Sheet connection failed: ${err.message}`;
+          sheetStatus.style.whiteSpace = "pre-line";
+          sheetStatus.style.color = "var(--color-oxblood-700)";
+        }
+      }
+    }, "âš¡ Test Sheet");
+    const sheetVerifyBtn = JF.Utils.el("button", {
+      class: "btn btn--primary btn--sm",
+      type: "button",
+      onclick: async () => {
+        const url = sheetInput.value.trim();
+        if (!url) { JF.Toast?.show("Paste the rulebook sheet URL first.", "danger"); return; }
+        sheetStatus.textContent = "â³ Writing/reading a probe row inside the sheet...";
+        sheetStatus.style.color = "var(--color-ink-500)";
+        try {
+          const ad = new JF.Data.SheetRulesAdapter(null);
+          ad.configure({ endpoint: url, token: JF.Store.getConfig("rules_token") || "" });
+          const r = await ad.verify();
+          sheetStatus.textContent = `${r.ok ? "âœ…" : "âš ï¸"} ${r.message || "verified"} (document: ${r.document || "?"})`;
+          sheetStatus.style.color = r.ok ? "var(--color-success-700)" : "var(--color-oxblood-700)";
+          JF.Toast?.show(r.ok ? "Rulebook sheet verified." : "Sheet verification found problems.", r.ok ? "success" : "warning");
+        } catch (err) {
+          sheetStatus.textContent = `âŒ Verification failed: ${err.message}`;
+          sheetStatus.style.color = "var(--color-oxblood-700)";
+        }
+      }
+    }, "ðŸ©º Verify Sheet");
+    const sheetInstallBtn = JF.Utils.el("button", {
+      class: "btn btn--accent btn--sm",
+      type: "button",
+      onclick: async () => {
+        const url = sheetInput.value.trim();
+        if (!url) { JF.Toast?.show("Paste the rulebook sheet URL first.", "danger"); return; }
+        if (!confirm("Install the built-in rulebook (85 rules + parameters) into the sheet's three tabs?\n\nExisting rows are kept; only missing ones are added.")) return;
+        sheetStatus.textContent = "â³ Writing the rulebook into the sheet tabs...";
+        try {
+          const ad = new JF.Data.SheetRulesAdapter(null);
+          ad.configure({ endpoint: url, token: JF.Store.getConfig("rules_token") || "" });
+          const res = await ad.seedRules();
+          sheetStatus.textContent = `âœ… Installed: ${res?.rules?.added || 0} new rule row(s), ${res?.parameters?.added || 0} parameter row(s). Open the spreadsheet to see the tabs.`;
+          sheetStatus.style.color = "var(--color-success-700)";
+          JF.Toast?.show("Rulebook written to the sheet.", "success");
+        } catch (err) {
+          sheetStatus.textContent = `âŒ Install failed: ${err.message}`;
+          sheetStatus.style.color = "var(--color-oxblood-700)";
+        }
+      }
+    }, "ðŸ“¥ Install rulebook into sheet");
+
     const demoBtn = JF.Utils.el("button", {
       class: "btn btn--ghost btn--sm",
       type: "button",
@@ -10754,7 +11030,21 @@ JF.Views.Settings = (function () {
         JF.Utils.el("div", { class: "field__hint", style: "margin-top:10px" },
           "ðŸ”’ Data safety: there is no one-click erase in the app by design - your records belong in MongoDB (Atlas keeps continuous backups). Load Demo Farm replaces this device's data with the sample farm (it asks first)."),
         JF.Utils.el("div", { class: "field__hint", style: "margin-top:10px;color:var(--color-success-700)" },
-          "ðŸ’¡ Your rules persist in MongoDB: rule toggles, lead times, parameters and vet overrides are written to the Rules / Rule_Parameters / Rule_Overrides collections the moment you change them in the app. After a refresh or on another device they load from the database, so phone and PC always agree.")
+          "ðŸ’¡ HYBRID SPLIT: farm data (animals, milk, expenses, photos) lives in MongoDB, while your RULES live in a Google Sheet you can edit like a spreadsheet. Set the sheet up once (RULEBOOK-SHEET-SETUP.md) and paste its URL below â€” every rule toggle, parameter and vet override then reads/writes the Sheet's Rules / Rule_Parameters / Rule_Overrides tabs. Until then rules live with the database/device and nothing changes."),
+      fieldGroup("ðŸ“‘ RULEBOOK GOOGLE SHEET (RULE/ADMIN CONSOLE)", "Edit Rules Like a Spreadsheet", [
+        JF.Utils.el("div", { class: "field" }, [
+          JF.Utils.el("label", { class: "field__label" }, "Rulebook Google Sheet URL (Apps Script /exec)"),
+          sheetInput,
+          JF.Utils.el("div", { class: "field__hint" },
+            "One-time setup: create a Google Spreadsheet â†’ Extensions â†’ Apps Script â†’ paste google-apps-script/Code.gs â†’ Deploy as Web app (Execute as: Me, Access: Anyone). Paste the /exec URL here. The three tabs become the live rulebook: edit a value in the Sheet, the app picks it up; change something in the app, the Sheet updates."),
+          sheetStatus,
+        ]),
+        JF.Utils.el("div", { style: "display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;" }, [
+          sheetTestBtn,
+          sheetVerifyBtn,
+          sheetInstallBtn,
+        ]),
+      ])
       ]),
       fieldGroup("ðŸ  FARM INFORMATION", "Farm & System Defaults", [
         JF.Utils.el("div", { class: "grid grid--cols-2" }, [
@@ -10918,6 +11208,14 @@ JF.Views.Settings = (function () {
         }
       }
 
+      // The rulebook sheet URL lives in localStorage like the other endpoints,
+      // so the SheetRulesAdapter picks it up on its next call.
+      const sheetUrl = document.getElementById("cfg-rules-endpoint")?.value?.trim();
+      if (sheetUrl !== null && sheetUrl !== undefined) {
+        JF.Store.setConfig("rules_endpoint", sheetUrl);
+        JF.Store.configureRuleSheet({ endpoint: sheetUrl, token: JF.Store.getConfig("rules_token") || "" });
+      }
+
       JF.Toast?.show("Settings saved successfully!", "success");
     } catch (e) {
       console.error(e);
@@ -11020,7 +11318,7 @@ JF.Views.Rules = (function () {
     wrap.appendChild(JF.Utils.el("div", { class: "card", style: "margin-top:16px" }, [
       JF.Utils.el("h3", { style: "margin:0 0 6px" }, "How this drives the farm"),
       JF.Utils.el("p", { class: "field__hint", style: "margin:0" },
-        "Entries are saved (MongoDB through the farm API, or this device) â†’ active rules are matched against the animal and its records â†’ Rule_Parameters and any animal Rule_Overrides decide the real value â†’ the engine produces reminders, calculations and alerts â†’ they appear on the dashboard, the reminders list and the animal's timeline. Change a value in the database and the website follows, with no code change."),
+        "Entries are saved to the farm database (MongoDB through the farm API, or this device) â†’ active rules are matched against the animal and its records â†’ Rule_Parameters and any animal Rule_Overrides decide the real value â†’ the engine produces reminders, calculations and alerts â†’ they appear on the dashboard, the reminders list and the animal's timeline. Change a value in the rulebook â€” the Google Sheet tabs or the database â€” and the website follows, with no code change."),
       JF.Utils.el("div", { class: "field__hint", style: "margin-top:8px" },
         `Value layering: rule default < farm parameter < animal override.  Currently reading from: ${s.source}.`),
     ]));
@@ -11033,19 +11331,19 @@ JF.Views.Rules = (function () {
     };
 
     // Persistence card: shows where the config is saved and lets the user push
-    // this device's configuration into the database explicitly.
+    // this device's configuration into the rulebook home explicitly.
     const mirrorLine = JF.Utils.el("p", { class: "field__hint", style: "margin:0", id: "rules-mirror-status" }, "Checking where your rules are saved...");
-    const pushBtn = JF.Utils.el("button", { class: "btn btn--accent btn--sm", type: "button" }, "â¬†ï¸ Push rules to MongoDB");
+    const pushBtn = JF.Utils.el("button", { class: "btn btn--accent btn--sm", type: "button" }, "â¬†ï¸ Push rules to the rulebook home");
     pushBtn.onclick = run(pushBtn, async () => {
       const r = await JF.RuleEngine.syncFromMirror();
-      msg(status, `Pushed your rule configuration to the database (~${r.rules} rule row(s), ~${r.params} parameter row(s) updated). Every device loads these on next load.`);
-      JF.Toast.show("Rule configuration pushed to MongoDB.", "success");
+      msg(status, `Pushed your rule configuration to the rulebook home (~${r.rules} rule row(s), ~${r.params} parameter row(s) written). Every device loads these on next load.`);
+      JF.Toast.show("Rule configuration pushed to the rulebook home.", "success");
       render(["overview"]);
     });
     wrap.appendChild(JF.Utils.el("div", { class: "card", style: "margin-top:16px" }, [
       JF.Utils.el("h3", { style: "margin:0 0 6px" }, "ðŸ’¾ Where your rules are saved"),
       JF.Utils.el("p", { class: "field__hint", style: "margin:0" },
-        "Every toggle, lead time, parameter and override you change is written into MongoDB the moment you save it (Rules / Rule_Parameters / Rule_Overrides collections). After a refresh â€” or on your phone and PC together â€” the app loads the configuration back from the database, so MongoDB is the single home of your rules. Edits made directly in Atlas are picked up when you return to this tab, or with Reload from Database above."),
+        "HYBRID SETUP: your farm DATA (animals, milk, expenses...) lives in MongoDB, while the RULES live in the three tabs of your Google Sheet rulebook (Rules / Rule_Parameters / Rule_Overrides) when its URL is set in Settings. Every toggle, lead time, parameter and override you change here is written straight into the sheet, and edits you make directly in the Sheet appear in the app on the next visit to this tab. No sheet connected? The rules then live with the database/device like before."),
       mirrorLine,
       JF.Utils.el("div", { style: "margin-top:10px" }, [pushBtn]),
     ]));
@@ -11071,7 +11369,7 @@ JF.Views.Rules = (function () {
       const clip = ["=== Rules ===", rulesTsv, "", "=== Rule_Parameters ===", paramsTsv, "",
         "=== How to use ===",
         "This copy is for review or backup: paste into any spreadsheet to audit the rulebook.",
-        "The live source of truth is MongoDB (Settings -> Farm API URL); the app reads rules from there when connected.",
+        "The live source of truth is the rulebook home - the Google Sheet tabs when connected, otherwise the farm database.",
       ].join("\n");
       try { await navigator.clipboard.writeText(clip); } catch (e) {
         const ta = document.createElement("textarea");
@@ -11085,7 +11383,7 @@ JF.Views.Rules = (function () {
     wrap.appendChild(JF.Utils.el("div", { class: "card", style: "margin-top:16px" }, [
       JF.Utils.el("h3", { style: "margin:0 0 6px" }, "ðŸ“„ Export the rulebook"),
       JF.Utils.el("p", { class: "field__hint", style: "margin:0" },
-        "Copy the complete rulebook (rules, parameters) as tab-separated text - open any spreadsheet and paste to review, print or back it up. The live source of truth is your MongoDB database, which the app reads whenever the farm API URL is configured in Settings."),
+        "Copy the complete rulebook (rules, parameters) as tab-separated text - open any spreadsheet and paste to review, print or back it up. The live source of truth is your rulebook home: the Google Sheet tabs when connected, otherwise the farm database."),
       JF.Utils.el("div", { style: "margin-top:10px" }, [tsvBtn]),
       tsvLine,
     ]));
@@ -11097,7 +11395,7 @@ JF.Views.Rules = (function () {
       render(["rules"]);
     });
 
-    const reloadBtn = JF.Utils.el("button", { class: "btn btn--ghost btn--sm", type: "button" }, "Reload from Database");
+    const reloadBtn = JF.Utils.el("button", { class: "btn btn--ghost btn--sm", type: "button" }, "ðŸ”„ Reload from Sheet/Database");
     reloadBtn.onclick = run(reloadBtn, async () => {
       const r = await JF.RuleEngine.load();
       msg(status, `Loaded ${r.rules} rules, ${r.params} parameters, ${r.overrides} overrides from ${r.source}.`);
@@ -11129,16 +11427,15 @@ JF.Views.Rules = (function () {
         cats.map(([c, n]) => JF.Utils.el("span", { class: "badge badge--info" }, `${c} Â· ${n}`))),
     ]));
 
-    // Where is this device's configuration saved? (Connected mode: the backend is
-    // the home; the local copy is a cache. Mock mode: this device IS the storage.)
+    // Where do the rules live right now? (HYBRID: sheet when configured, else
+    // the data backend; mock device store when nothing is connected.)
     try {
-      const backend = JF.Store.getConfig("backend") || "mock";
-      const adapter = JF.Store.getAdapter();
-      const live = backend !== "mock" && adapter && !adapter.isPlaceholder;
       const m = await JF.RuleEngine.mirrorStatus();
-      if (mirrorLine) mirrorLine.textContent = live
-        ? `Backend is LIVE â€” rules save to the Rules / Rule_Parameters / Rule_Overrides collections as you edit. Local device copy: ${m.rules} rule row(s), ${m.params} parameter row(s).`
-        : `Offline/local mode â€” your edits persist on this device (${m.rules} rule row(s), ${m.params} parameter row(s) cached). Connect the backend in Settings to share them across devices.`;
+      if (mirrorLine) mirrorLine.textContent = m.home === "sheet"
+        ? `HYBRID LIVE â€” farm data in the database, rules read/written to the Google Sheet tabs (${m.rules} rule row(s), ${m.params} parameter row(s) visible). Sheet edits load here on tab focus or with Reload.`
+        : m.home === "mongo"
+          ? `Rules live in MongoDB (no Sheet URL configured yet) - ${m.rules} rule row(s), ${m.params} parameter row(s). Add the Google Sheet rulebook in Settings to edit rules like a spreadsheet.`
+          : `Offline/local mode â€” your edits persist on this device (${m.rules} rule row(s), ${m.params} parameter row(s)). Connect the database and the Google Sheet rulebook in Settings to share them across devices.`;
     } catch (e) { if (mirrorLine) mirrorLine.textContent = ""; }
     return wrap;
   };
@@ -11193,7 +11490,7 @@ JF.Views.Rules = (function () {
       [JF.Utils.el("option", { value: "" }, "All categories")].concat(cats.map((c) => JF.Utils.el("option", { value: c }, c))));
     select.onchange = () => { filter = select.value; draw(); };
     wrap.appendChild(JF.Utils.el("div", { class: "page__head-row" }, [select]));
-    wrap.appendChild(JF.Utils.el("p", { class: "field__hint" }, "Turn a rule off to stop it generating new reminders (history is kept). Lead time is the number of days before the due date that the reminder appears. Every toggle and lead time is saved into the Rules sheet, so it survives refreshes and shows on your phone and PC alike."));
+    wrap.appendChild(JF.Utils.el("p", { class: "field__hint" }, "Turn a rule off to stop it generating new reminders (history is kept). Lead time is the number of days before the due date that the reminder appears. Every toggle and lead time is saved into the rulebook home (Google Sheet tabs or database), so it survives refreshes and shows on your phone and PC alike."));
     wrap.appendChild(host);
     draw();
     return wrap;
@@ -11223,7 +11520,7 @@ JF.Views.Rules = (function () {
         ]);
       })),
     ]);
-    wrap.appendChild(JF.Utils.el("p", { class: "field__hint" }, "These are the biological and farm-protocol values the rules read. Change 90 â†’ 120 here (or in the Rule_Parameters sheet) and every rule using it follows, with no code change."));
+    wrap.appendChild(JF.Utils.el("p", { class: "field__hint" }, "These are the biological and farm-protocol values the rules read. Change 90 â†’ 120 here (or directly in the Rule_Parameters tab of the Google Sheet) and every rule using it follows, with no code change."));
     wrap.appendChild(status);
     wrap.appendChild(JF.Utils.el("div", { class: "table-wrap" }, [table]));
     return wrap;
@@ -11318,7 +11615,7 @@ JF.Views.Rules = (function () {
         JF.Utils.el("div", { class: "eyebrow" }, "ðŸ§  Rule engine"),
         JF.Utils.el("h1", { class: "page__title", style: { marginTop: "8px" } }, SUB[sub]?.label || "Rule Engine"),
         JF.Utils.el("p", { class: "page__sub", style: { marginTop: "var(--space-2)" } },
-          "The farm's own rules, stored in your MongoDB database: entries are matched against them to produce reminders, calculations and alerts."),
+          "The farm's own rules, stored in your Google Sheet rulebook (or the database until a sheet is connected): entries are matched against them to produce reminders, calculations and alerts."),
       ]),
     ]));
     page.appendChild(subNav(sub));

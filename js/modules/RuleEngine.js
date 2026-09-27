@@ -20,12 +20,13 @@ window.JF = window.JF || {};
  *
  * Persistence (why edits survive a refresh on any device):
  *   Every edit (rule toggle, lead time, parameter value, override) is written
- *   THROUGH into the data store. With MongoDB as the backend that means the
- *   Rules / Rule_Parameters / Rule_Overrides tabs are altered in place, so the
- *   website and the sheet always agree and every device picks the change up on
- *   its next load (boot, or the moment the tab is refocused). On boot the sheets
- *   are read FIRST and the built-in rulebook only fills rows the sheet has never
- *   seen - so the sheet, not the code, is the source of truth once connected.
+ *   THROUGH into the rulebook home - the three entities Rules / Rule_Parameters /
+ *   Rule_Overrides, which the store routes to the Google Sheet rule console when
+ *   its URL is configured (HYBRID: MongoDB holds the farm DATA, the Sheet holds
+ *   the RULES), and to MongoDB/this device otherwise. Every device picks changes
+ *   up on its next load (boot, or the moment the tab is refocused). On boot the
+ *   stored rows are read FIRST and the built-in rulebook only fills rows the home
+ *   has never seen - so the rulebook home, not the code, is the source of truth.
  */
 JF.RuleEngine = (function () {
 
@@ -49,34 +50,16 @@ JF.RuleEngine = (function () {
   /* ------------------------------------------------------------------ */
 
   /**
-   * Mirror configuration rows into the STORE (never the live adapter), so with
-   * MongoDB as the backend they are written to the Rules / Rule_Parameters /
-   * Rule_Overrides tabs. This is what makes a change survive a refresh and reach
-   * every other device; in mock mode it simply persists on the device.
+   * There is no secondary mirror: the store routes the three rule entities to
+   * their home (Google Sheet when configured, else the data adapter), so one
+   * write-through is the whole story. See Store.js makeComposite().
    */
-  const mirrorToSheet = async (records) => {
-    if (!records || !records.length) return 0;
-    const store = new (JF.Data.MockAdapter)();
-    let written = 0;
-    for (const rec of records) {
-      const entity = rec.RuleID !== undefined ? "rules" : rec.ParameterID !== undefined ? "ruleParameters" : "ruleOverrides";
-      const id = String(rec.id || rec.RuleID || rec.ParameterID || rec.OverrideID || "");
-      if (!id) continue;
-      const payload = { ...rec, id };
-      try {
-        const existing = await store.get(entity, id);
-        if (existing) await store.update(entity, id, payload);
-        else { await store.create(entity, payload); written++; }
-      } catch (e) { console.warn("[RuleEngine] mirror:", entity, id, e.message); }
-    }
-    return written;
-  };
 
   const load = async () => {
     const book = BOOK();
-    // Built-in rulebook is the default LAYER; every row present in the sheets
-    // (or the local store) overrides it. Partial installs and single-row edits
-    // therefore never drop the rest of the configuration.
+    // Built-in rulebook is the default LAYER; every row present in the rulebook
+    // home (Google Sheet tabs, MongoDB collections or the device store) overrides
+    // it. Partial installs and single-row edits therefore never drop the rest.
     const merge = (base, overlay, key) => {
       const map = new Map();
       base.forEach((x) => map.set(String(x[key]), { ...x }));
@@ -87,22 +70,29 @@ JF.RuleEngine = (function () {
       });
       return [...map.values()];
     };
-    let sheetRules = 0, sheetParams = 0, mirrored = 0, autoInstalled = 0;
+    let sheetRules = 0, sheetParams = 0, autoInstalled = 0;
     try {
       const [rRows, pRows, oRows] = await Promise.all([
         JF.Store.rules.list(), JF.Store.ruleParameters.list(), JF.Store.ruleOverrides.list(),
       ]);
-      // First connection: the rule tabs exist but are empty. Install the built-in
-      // rulebook once and mirror it, so the SHEET becomes the home of the config
-      // from day one and every later device boots from the same rows.
+      // First connection: the rulebook home exists but is empty. Install the
+      // built-in rulebook once, so the home (sheet tabs or database collections)
+      // becomes the source of truth from day one and every later device boots
+      // from the same rows. Bulk seed where available (sheet/Mongo), else one
+      // create per row through the store.
       if (!(rRows || []).length && !(pRows || []).length) {
         try {
           // A remote backend with a bulk seed gets one server call; otherwise rows
           // are created one by one through the store.
           const ad = JF.Store.getAdapter();
-          const res = (ad && typeof ad.seedRules === "function" && !ad.isPlaceholder)
-            ? await (async () => { const s = await ad.seedRules(BOOK().seedPayload()); return { rules: (s.rules && (s.rules.added || s.rules.updated)) || 0, params: (s.parameters && (s.parameters.added || s.parameters.updated)) || 0 }; })()
-            : await installDefaults();
+          let res = null;
+          if (ad && typeof ad.seedRules === "function") {
+            const s = await ad.seedRules(BOOK().seedPayload());
+            res = { rules: (s && s.rules && (s.rules.added || s.rules.updated)) || 0, params: (s && s.parameters && (s.parameters.added || s.parameters.updated)) || 0 };
+          }
+          // A home without a bulk seed (device store, or a cold sheet fallback)
+          // reports zero counts: install row-by-row through the store instead.
+          if (!res || (!res.rules && !res.params)) res = await installDefaults();
           autoInstalled = (res.rules || 0) + (res.params || 0);
           const [r2, p2] = await Promise.all([JF.Store.rules.list(), JF.Store.ruleParameters.list()]);
           rRows.splice(0, rRows.length, ...r2);
@@ -115,25 +105,19 @@ JF.RuleEngine = (function () {
       params = Object.fromEntries(mergedParams.map((x) => [String(x.ParameterID), x]));
       sheetParams = (pRows || []).length;
       overrides = (oRows || []).filter((x) => truthy(x.Active));
-      // Keep the local mirror warm in mock mode too, so switching backends later
-      // (mock -> MongoDB) carries the configuration the device already has.
-      if (autoInstalled) {
-        mirrored = await mirrorToSheet([
-          ...(rRows || []).map((x) => ({ ...x, Active: truthy(x.Active), id: x.id || x.RuleID })),
-          ...(pRows || []).map((x) => ({ ...x, id: x.id || x.ParameterID })),
-        ]);
-      }
     } catch (e) {
       console.warn("[RuleEngine] stored rule rows unreadable, using built-in rulebook:", e.message);
       rules = book.RULES.map((x) => ({ ...x }));
       params = book.paramMap();
       overrides = [];
     }
+    const home = (JF.Store.homeOf && JF.Store.homeOf("rules")) || "device";
+    const homeName = home === "sheet" ? "Google Sheet rulebook" : home === "mongo" ? "MongoDB" : "this device";
     loadSource = sheetRules || sheetParams
-      ? `database (${sheetRules} rule rows, ${sheetParams} parameter rows) overriding the built-in rulebook`
+      ? `${homeName} (${sheetRules} rule rows, ${sheetParams} parameter rows) overriding the built-in rulebook`
       : "built-in rulebook";
     loadedAt = new Date().toISOString();
-    return { rules: rules.length, params: Object.keys(params).length, overrides: overrides.length, source: loadSource, mirrored, autoInstalled };
+    return { rules: rules.length, params: Object.keys(params).length, overrides: overrides.length, source: loadSource, home, autoInstalled };
   };
 
   const ensureLoaded = async () => { if (!loadedAt) await load(); };
@@ -154,20 +138,13 @@ JF.RuleEngine = (function () {
       added++;
     }
     let addedP = 0;
-    const createdParams = [];
     for (const par of book.PARAMS) {
       if (haveP.has(par.ParameterID)) continue;
-      const rec = { ...par, id: par.ParameterID };
-      await JF.Store.ruleParameters.create(rec);
-      createdParams.push(rec);
+      await JF.Store.ruleParameters.create({ ...par, id: par.ParameterID });
       addedP++;
     }
-    // Mirror the NEWLY installed rows into the local mirror, so a later backend
-    // switch (mock <-> MongoDB) carries them. Only new rows: existing edits are
-    // never overwritten, exactly like the sheet-side install.
-    try { await mirrorToSheet([...createdRules, ...createdParams]); } catch (e) { console.warn("[RuleEngine] install mirror:", e.message); }
     await load();
-    await audit("install-rulebook", "Rules", "", `+${added} rules, +${addedP} parameters (persisted in the sheet)`);
+    await audit("install-rulebook", "Rules", "", `+${added} rules, +${addedP} parameters (persisted in the rulebook home)`);
     return { rules: added, params: addedP };
   };
 
@@ -823,21 +800,23 @@ JF.RuleEngine = (function () {
   };
 
   /* ------------------------------------------------------------------ */
-  /* Rule editing (writes back to the sheets)                            */
+  /* Rule editing (write-through to the rulebook home)                 */
   /* ------------------------------------------------------------------ */
 
   /**
-   * Every edit goes through the store so it lands in the database (mock
-   * backend: it persists on the device). The live adapter must NOT be touched -
-   * the engine listens to it and would re-enter itself.
+   * Every edit goes through the store, so it lands in the rulebook home - the
+   * Google Sheet tabs when configured, otherwise MongoDB or the device store.
+   * The engine reads through the same store, so it never talks to an adapter
+   * directly (that would re-enter itself via the change events).
    */
   const setRuleField = async (ruleId, field, value) => {
     const rule = rules.find((r) => String(r.RuleID) === String(ruleId));
     if (!rule) return null;
     const rec = { ...rule, [field]: value, id: rule.RuleID };
-    try { await mirrorToSheet([rec]); } catch (e) { console.warn("[RuleEngine] rule write-through:", e.message); }
-    if (rule.id) await JF.Store.rules.update(rule.id, { [field]: value });
-    else await JF.Store.rules.create(rec);
+    try {
+      if (rule.id) await JF.Store.rules.update(rule.id, { [field]: value });
+      else await JF.Store.rules.create(rec);
+    } catch (e) { console.warn("[RuleEngine] rule write-through:", e.message); }
     rule[field] = value;
     await audit("rule-updated", "Rules", ruleId, `${field} = ${value}`);
     return rule;
@@ -850,10 +829,6 @@ JF.RuleEngine = (function () {
       const base = BOOK().paramMap()[parameterId] || { ParameterID: parameterId, Parameter: parameterId, Unit: "Days", Active: true, Notes: "" };
       await JF.Store.ruleParameters.create({ ...base, Value: value, id: parameterId });
     }
-    const merged = paramRow(parameterId);
-    if (merged) {
-      try { await mirrorToSheet([{ ...merged, Value: value, id: parameterId }]); } catch (e) { console.warn("[RuleEngine] parameter write-through:", e.message); }
-    }
     await load();
     await audit("parameter-updated", "Rule_Parameters", parameterId, `= ${value}`);
     return true;
@@ -865,19 +840,16 @@ JF.RuleEngine = (function () {
       StartDate: today(), EndDate: "", Reason, ApprovedBy, Active: true,
     };
     await JF.Store.ruleOverrides.create({ ...rec, id: rec.OverrideID });
-    try { await mirrorToSheet([{ ...rec, id: rec.OverrideID }]); } catch (e) { console.warn("[RuleEngine] override write-through:", e.message); }
     overrides.push(rec);
     await audit("override-added", "Rule_Overrides", rec.OverrideID, `${RuleID} for ${AnimalID} = ${Value} ${Unit}`);
     return rec;
   };
 
-  /** Delete a per-animal override everywhere (store + sheet mirror). */
+  /** Delete a per-animal override (lives in the rulebook home). */
   const removeOverride = async (overrideId) => {
     await JF.Store.ruleOverrides.delete(overrideId);
-    const store = new (JF.Data.MockAdapter)();
-    try { await store.delete("ruleOverrides", String(overrideId)); } catch (e) {}
     await load();
-    await audit("override-removed", "Rule_Overrides", overrideId, "deleted from the app and the sheet");
+    await audit("override-removed", "Rule_Overrides", overrideId, "deleted from the rulebook home");
     return true;
   };
 
@@ -893,34 +865,37 @@ JF.RuleEngine = (function () {
   };
 
   /**
-   * Push this device's full rule configuration into MongoDB (update mode).
-   * Covers the reverse path of load(): rules edited while the device was offline,
-   * or a rulebook shipped with a newer app version, reach the sheet here. Existing
-   * sheet rows are updated field-by-field; rows the payload does not carry are kept.
+   * Push this device's full rule configuration into the rulebook home (update
+   * mode). Covers the reverse path of load(): rules edited while this device was
+   * offline, or a rulebook shipped with a newer app version, reach the home here.
+   * Existing rows are updated field-by-field; rows the payload does not carry are
+   * kept - so a farm-wide Sheet edit and a device edit can both survive.
    */
+  const listRules = () => rules.map((x) => ({ ...x }));
+  const listParams = () => Object.values(params).map((x) => ({ ...x }));
+
   const syncFromMirror = async () => {
     await ensureLoaded();
     const rulesRows = listRules().map((x) => ({ ...x, Active: truthy(x.Active), id: x.RuleID }));
     const paramRows = listParams().map((x) => ({ ...x, id: x.ParameterID }));
     let out = { rules: 0, params: 0 };
     const ad = JF.Store.getAdapter();
-    if (ad && typeof ad.syncRules === "function" && !ad.isPlaceholder) {
+    if (ad && typeof ad.syncRules === "function") {
       const res = await ad.syncRules({ rules: rulesRows, ruleParameters: paramRows, overrides: [] });
-      out = { rules: (res.rules && res.rules.updated) || 0, params: (res.parameters && res.parameters.updated) || 0 };
-    } else {
-      await mirrorToSheet([...rulesRows, ...paramRows]);
+      out = { rules: (res && res.rules && (res.rules.added || res.rules.updated)) || 0, params: (res && res.parameters && (res.parameters.added || res.parameters.updated)) || 0 };
     }
-    await audit("sync-rules-to-sheet", "Rules", "", `pushed config: ~${out.rules} rule row(s), ~${out.params} parameter row(s) updated`);
+    await load();
+    await audit("sync-rules-to-home", "Rules", "", `pushed config: ~${out.rules} rule row(s), ~${out.params} parameter row(s) written`);
     return out;
   };
 
-  /** How many config rows the local mirror currently holds (0 = mirror cold). */
+  /** Quick facts for the UI: where rules live and how rows are visible there. */
   const mirrorStatus = async () => {
     try {
-      const store = new (JF.Data.MockAdapter)();
-      const [r, p] = await Promise.all([store.list("rules"), store.list("ruleParameters")]);
-      return { rules: r.length, params: p.length };
-    } catch (e) { return { rules: 0, params: 0 }; }
+      const [r, p] = await Promise.all([JF.Store.rules.list(), JF.Store.ruleParameters.list()]);
+      const home = (JF.Store.homeOf && JF.Store.homeOf("rules")) || "device";
+      return { home, rules: r.length, params: p.length };
+    } catch (e) { return { home: "device", rules: 0, params: 0 }; }
   };
 
   const stats = () => ({
@@ -939,8 +914,7 @@ JF.RuleEngine = (function () {
     init: async () => { await load(); await evaluateAll(); return stats(); },
     load, ensureLoaded, focus, installDefaults, syncFromMirror, mirrorStatus, evaluateAll, evaluateAnimal, clearReminders, rebuild,
     explain, dataQuality, setRuleField, setParamValue, addOverride, removeOverride, stats, isEnabled,
-    listRules: () => rules.map((x) => ({ ...x })),
-    listParams: () => Object.values(params).map((x) => ({ ...x })),
+    listRules, listParams,
     resolveValue: (ruleId, animalId) => {
       const rule = rules.find((r) => String(r.RuleID) === String(ruleId));
       return rule ? resolve(rule, animalId) : null;
