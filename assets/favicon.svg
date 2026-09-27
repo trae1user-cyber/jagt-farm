@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f2c14e"/>
+      <stop offset="1" stop-color="#a33327"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+  <!-- cowboy hat -->
+  <path d="M14 34 q18 8 36 0 q-4 -6 -10 -7 q0 -8 -8 -8 q-8 0 -8 8 q-6 1 -10 7z" fill="#241610"/>
+  <!-- cow head below brim -->
+  <circle cx="32" cy="45" r="10" fill="#fdf8ef"/>
+  <path d="M24 38 q-6 -6 -4 -12 q6 2 8 8z" fill="#fdf8ef"/>
+  <path d="M40 38 q6 -6 4 -12 q-6 2 -8 8z" fill="#fdf8ef"/>
+  <circle cx="28.5" cy="44" r="1.6" fill="#241610"/>
+  <circle cx="35.5" cy="44" r="1.6" fill="#241610"/>
+  <ellipse cx="32" cy="49" rx="3.4" ry="2.4" fill="#b92473"/>
+  <!-- phulkari stitch dots -->
+  <circle cx="8" cy="8" r="2" fill="#b92473"/>
+  <circle cx="56" cy="8" r="2" fill="#b92473"/>
+  <circle cx="8" cy="56" r="2" fill="#f2c14e"/>
+  <circle cx="56" cy="56" r="2" fill="#f2c14e"/>
+</svg>

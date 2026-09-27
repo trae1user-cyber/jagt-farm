@@ -1,0 +1,20 @@
+# Render Blueprint for the Jagt Farm API
+# Deploy with: Render dashboard -> New + -> Blueprint -> pick this repository.
+# Secrets (MONGO_URI, MONGO_TOKEN) are entered in the Render dashboard, never here.
+
+services:
+  - type: web
+    name: jagt-farm-api
+    runtime: node
+    plan: free
+    rootDir: server
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: MONGO_URI        # paste your mongodb+srv://... string in the dashboard
+        sync: false
+      - key: MONGO_DB
+        value: jagt_farm
+      - key: MONGO_TOKEN      # pick a long random secret (optional but recommended)
+        sync: false

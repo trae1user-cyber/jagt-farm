@@ -1,0 +1,266 @@
+/* ============================================================
+   Cream × Dairy-Green theme layer
+   Warm cream surfaces, deep dairy-green sidebar, marigold
+   accents, soft rounded cards, phulkari stitch kept as a
+   festive detail. Loaded after components/layout so it can
+   override them.
+   ============================================================ */
+
+/* ---------- Phulkari & pattern utilities ---------- */
+.phulkari-strip {
+  height: 8px;
+  background:
+    repeating-linear-gradient(45deg,
+      var(--brand-magenta) 0 10px,
+      var(--brand-marigold) 10px 20px,
+      var(--brand-chili) 20px 30px,
+      var(--brand-denim) 30px 40px);
+  background-size: 56px 100%;
+  opacity: 0.95;
+}
+.phulkari-strip--thin { height: 4px; }
+
+.phulkari-diamond {
+  background-image:
+    linear-gradient(135deg, transparent 46%, var(--brand-magenta) 46% 54%, transparent 54%),
+    linear-gradient(45deg, transparent 46%, var(--brand-marigold) 46% 54%, transparent 54%);
+  background-size: 22px 22px;
+  opacity: 0.14;
+}
+
+.leather {
+  background:
+    radial-gradient(120% 120% at 20% 10%, rgba(255,255,255,0.08), transparent 40%),
+    linear-gradient(160deg, #1d4d38, #16382b 70%);
+  color: #f1f4e8;
+}
+
+/* ---------- Page scaffold ---------- */
+.app-shell { background: var(--color-bg); }
+.view-root {
+  background-image:
+    radial-gradient(circle at 12% 8%, rgba(47,125,92,0.05), transparent 34%),
+    radial-gradient(circle at 88% 4%, rgba(242,193,78,0.10), transparent 40%);
+}
+
+.page__title, .section__title {
+  font-family: var(--font-display);
+  letter-spacing: -0.01em;
+  font-weight: 800;
+}
+.page__title { text-transform: none; }
+.eyebrow { color: var(--color-accent-600); letter-spacing: 0.18em; font-weight: 700; }
+
+/* ---------- Sidebar: deep dairy green ---------- */
+.sidebar {
+  background:
+    radial-gradient(140% 100% at 0% 0%, rgba(242,193,78,0.07), transparent 50%),
+    linear-gradient(170deg, #16382b 0%, #122e23 60%, #0f2a1f 100%);
+}
+.sidebar::after {
+  content: "";
+  position: absolute; top: 0; bottom: 0; right: -1px; width: 3px;
+  background: repeating-linear-gradient(90deg,
+    var(--brand-marigold) 0 7px, transparent 7px 14px);
+  opacity: 0.5;
+}
+.sidebar__logo {
+  background: linear-gradient(145deg, var(--brand-marigold), var(--brand-chili));
+  box-shadow: 0 8px 24px rgba(226, 112, 58, 0.35);
+}
+.sidebar__brand-sub { color: var(--brand-marigold); }
+.nav-item.is-active {
+  background: linear-gradient(90deg, rgba(242,193,78,0.16), rgba(242,193,78,0.02));
+  box-shadow: inset 3px 0 0 var(--brand-marigold);
+  border-radius: var(--radius-md);
+}
+.nav-item { border-radius: var(--radius-md); }
+.nav-item.is-active .nav-item__icon { background: rgba(242,193,78,0.2); color: var(--brand-marigold); }
+.nav-item.is-active .nav-item__count { background: var(--brand-chili); }
+.nav-group__title { color: rgba(242,193,78,0.55); }
+.sidebar__user-name { color: #fff; }
+
+/* ---------- Topbar: warm cream ---------- */
+.topbar {
+  background: rgba(255, 253, 246, 0.94);
+  border-bottom: 1px solid var(--color-ink-100);
+  box-shadow: 0 1px 0 rgba(47,125,92,0.08);
+}
+
+/* ---------- Buttons: soft pill, dairy green ---------- */
+.btn { border-radius: var(--radius-full); position: relative; font-weight: 600; }
+.btn--primary {
+  background: linear-gradient(160deg, var(--color-accent-500), var(--color-accent-700));
+  box-shadow: 0 6px 18px rgba(47,125,92,0.3);
+}
+.btn--primary:hover { filter: brightness(1.06); }
+.btn--accent {
+  background: linear-gradient(160deg, var(--brand-marigold), var(--color-wheat-500));
+  color: var(--color-ink-900);
+  box-shadow: 0 6px 18px rgba(207,145,16,0.32);
+}
+.btn--danger {
+  background: linear-gradient(160deg, var(--brand-chili), #b8552a);
+}
+.btn--ghost { border: 1.5px solid var(--color-ink-200); background: var(--color-bg-elevated); }
+.btn--ghost:hover { border-color: var(--color-accent-500); color: var(--color-accent-600); }
+
+/* ---------- Cards: buttery cream, soft & round ---------- */
+.card {
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-ink-100);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 2px 12px rgba(22, 56, 43, 0.05);
+  position: relative;
+}
+.card--stat { border-top: 3px solid var(--brand-marigold); }
+.stat-icon { background: var(--color-accent-100); color: var(--color-accent-700); }
+.stat-icon--danger { background: var(--color-danger-100); color: var(--color-danger-700); }
+.stat-icon--oxblood { background: var(--color-oxblood-100); color: var(--brand-magenta); }
+.stat-icon--wheat { background: var(--color-wheat-100); color: var(--color-wheat-700); }
+.stat-number { font-family: var(--font-display); letter-spacing: 0.01em; }
+
+/* ---------- Tables: soft ledger ---------- */
+.table th {
+  background: linear-gradient(180deg, #f1f4e8, #e9efdc);
+  border-bottom: 2px solid var(--color-accent-500);
+  color: var(--color-ink-700);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: var(--fs-caption);
+}
+.table tbody tr:nth-child(even) { background: rgba(228, 232, 216, 0.35); }
+.table tbody tr:hover { background: rgba(242,193,78,0.14); }
+
+/* ---------- Badges & chips ---------- */
+.badge--accent { background: var(--color-wheat-100); color: var(--color-wheat-700); }
+.badge--success { background: var(--color-success-100); color: var(--color-success-700); }
+.chip {
+  border: 1px solid var(--color-ink-200);
+  background: var(--color-bg-elevated);
+  border-radius: var(--radius-full);
+}
+.chip--toggle:has(input:checked) {
+  border-color: var(--color-accent-500);
+  background: var(--color-accent-50);
+  color: var(--color-accent-700);
+  font-weight: 600;
+}
+
+/* ---------- Timeline: soft green stitch ---------- */
+.timeline { position: relative; }
+.timeline::before {
+  content: "";
+  position: absolute; left: 15px; top: 6px; bottom: 6px; width: 2px;
+  background: repeating-linear-gradient(180deg,
+    var(--color-accent-400) 0 6px, transparent 6px 10px);
+  opacity: 0.5;
+}
+.timeline__dot {
+  background: var(--color-accent-500);
+  box-shadow: 0 0 0 3px var(--color-accent-100);
+}
+.timeline__dot--finance { background: var(--brand-marigold); box-shadow: 0 0 0 3px var(--color-wheat-100); }
+
+/* ---------- Tabs ---------- */
+.tab.is-active {
+  border-bottom: 3px solid var(--color-accent-500);
+  color: var(--color-accent-700);
+  font-weight: 700;
+}
+
+/* ---------- Modal: cream with marigold top ---------- */
+.modal {
+  border-top: 6px solid;
+  border-image: repeating-linear-gradient(45deg,
+    var(--brand-marigold) 0 12px, var(--brand-chili) 12px 24px) 6;
+  border-radius: var(--radius-lg);
+}
+
+/* ---------- Ranch hero (login-free landing banner) ---------- */
+.ranch-hero {
+  position: relative;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  background:
+    linear-gradient(115deg, rgba(22, 56, 43, 0.94) 0%, rgba(22, 56, 43, 0.6) 55%, rgba(226,112,58,0.35) 100%),
+    linear-gradient(140deg, var(--color-accent-700), var(--brand-chili));
+  color: #f7f3e4;
+  padding: clamp(22px, 5vw, 44px);
+  margin-bottom: var(--space-6);
+  border: 1px solid rgba(242,193,78,0.35);
+}
+.ranch-hero__kicker {
+  font-size: var(--fs-caption);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--brand-marigold);
+  font-weight: 700;
+}
+.ranch-hero__title {
+  font-family: var(--font-display);
+  font-size: clamp(26px, 5.2vw, 44px);
+  line-height: 1.12;
+  margin: 8px 0 10px;
+  color: #fffdf6;
+  max-width: 21ch;
+}
+.ranch-hero__sub {
+  font-size: var(--fs-md);
+  color: rgba(255, 253, 246, 0.85);
+  max-width: 52ch;
+}
+.ranch-hero__actions { display: flex; gap: var(--space-3); margin-top: var(--space-5); flex-wrap: wrap; }
+.ranch-hero__badge {
+  position: absolute; top: 18px; right: 18px;
+  width: 74px; height: 74px; border-radius: 50%;
+  background: radial-gradient(circle at 30% 30%, #f7d380, var(--brand-marigold) 60%, var(--brand-chili));
+  color: #4d2f0f; font-weight: 800; font-size: 10px; letter-spacing: 0.14em;
+  display: grid; place-items: center; text-align: center;
+  box-shadow: 0 10px 24px rgba(0,0,0,0.35);
+  transform: rotate(8deg);
+}
+
+/* ---------- Mobile FAB (quick entry thumb button) ---------- */
+.fab-quick {
+  position: fixed;
+  right: calc(var(--space-4) + env(safe-area-inset-right, 0px));
+  bottom: calc(var(--space-5) + env(safe-area-inset-bottom, 0px));
+  width: 60px; height: 60px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 32% 28%, var(--brand-marigold), var(--brand-chili));
+  color: #fff;
+  display: none;
+  place-items: center;
+  box-shadow: 0 12px 30px rgba(226, 112, 58, 0.45);
+  z-index: 40;
+  border: 2px solid rgba(255,253,246,0.85);
+}
+@media (max-width: 1024px) {
+  .fab-quick { display: grid; }
+}
+
+/* ---------- Photo picker (upload widget) ---------- */
+.photo-picker {
+  display: flex; align-items: center; gap: var(--space-4);
+  padding: var(--space-3);
+  border: 1.5px dashed var(--color-ink-200);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+}
+.photo-picker__preview {
+  width: 76px; height: 76px; border-radius: var(--radius-md);
+  object-fit: cover; border: 1px solid var(--color-ink-100);
+  background: var(--color-bg-sunken);
+}
+.photo-picker__input { font-size: var(--fs-sm); max-width: 100%; }
+
+/* ---------- Print: keep it clean & ink-friendly ---------- */
+@media print {
+  .fab-quick, .ranch-hero__badge { display: none !important; }
+}
+
+/* ---------- Reduced motion ---------- */
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
