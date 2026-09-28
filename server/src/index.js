@@ -35,10 +35,11 @@ if (!MONGO_URI) {
 // Entities -> collections. Same names the website's store uses.
 // ---------------------------------------------------------------------------
 const ENTITIES = new Set([
-  "animals", "calves", "heat", "ai", "pregnancy", "calving", "dry", "health",
-  "vaccination", "deworming", "treatment", "milk", "milkSales", "expenses",
-  "income", "sales", "purchases", "assets", "journal", "reminders", "rules",
-  "ruleParameters", "ruleOverrides", "settings", "files", "audit",
+  "animals", "calves", "heat", "ai", "insemination", "pregnancy", "calving", "dry",
+  "dryOff", "death", "health", "vaccination", "deworming", "treatment", "milk",
+  "milkSales", "expenses", "income", "sales", "purchases", "assets", "journal",
+  "reminders", "rules", "ruleParameters", "ruleOverrides", "settings", "files",
+  "audit", "groups",
 ]);
 
 const client = new MongoClient(MONGO_URI, { appName: "jagt" });

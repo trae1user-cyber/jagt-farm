@@ -25,12 +25,18 @@ JF.Data = JF.Data || {};
 JF.Data.MongoApiAdapter = (function () {
   const { Interface } = JF.Data.DataAdapter;
 
+  // Farm API defaults baked into the code, so every device connects with zero
+  // setup. Settings can still override them (localStorage wins when present).
+  const DEFAULT_ENDPOINT = "https://jagt-farm-api.onrender.com";
+  const DEFAULT_TOKEN = "jagt-farm-secret-9271-kxnq";
+
   class MongoApiAdapter extends Interface {
     constructor() {
       super();
       const stored = (() => { try { return localStorage.getItem("jf_api_endpoint"); } catch (e) { return null; } })();
-      this.endpoint = stored || "";
-      this.token = (() => { try { return localStorage.getItem("jf_api_token") || ""; } catch (e) { return ""; } })();
+      this.endpoint = stored || DEFAULT_ENDPOINT;
+      const storedTok = (() => { try { return localStorage.getItem("jf_api_token"); } catch (e) { return null; } })();
+      this.token = storedTok != null ? storedTok : DEFAULT_TOKEN;
       this.listeners = new Map();
       this.lastStatus = null;
       this.isPlaceholder = true; // flips false once a real endpoint is configured

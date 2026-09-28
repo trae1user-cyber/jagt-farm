@@ -262,6 +262,33 @@ JF.App = (function () {
       JF.Store.on("seeded", () => updateBadgeCounts());
     } catch (e) {}
 
+    // First boot against an empty MongoDB: seed one dummy animal + heat entry so
+    // the database, API round trip and rule engine are proven end to end. Runs
+    // only when the farm has no animals at all, and never again after that.
+    try {
+      const animals = await JF.Store.animals.list();
+      if (!animals.length) {
+        const dummy = await JF.Store.animals.create({
+          AnimalID: "COW-0001",
+          Name: "Lakshmi",
+          Gender: "Female",
+          Category: "Cow",
+          Breed: "HF Cross",
+          DateOfBirth: "2022-03-10",
+          CurrentStatus: "Lactating",
+          Notes: "First entry — connection test (safe to edit or delete).",
+        });
+        await JF.Store.heat.create({
+          HeatID: "HT-0001",
+          AnimalID: dummy.AnimalID || dummy.id,
+          HeatDate: JF.Utils.todayISO(),
+          ObservationMethod: "Visual",
+          Notes: "Seeded heat entry for the connection test.",
+        });
+        console.info("[JF] MongoDB was empty — seeded dummy animal COW-0001 + heat entry.");
+      }
+    } catch (e) { console.warn("Dummy seed skipped:", e?.message || e); }
+
     // Router
     window.addEventListener("hashchange", onHashChange);
     if (!location.hash) location.hash = "#dashboard";
@@ -272,8 +299,9 @@ JF.App = (function () {
     // Wire quick-entry button fallback if not already
     console.info("%c🐄 Jagt Farm — Cattle Management System",
       "color:#225830; font-size:16px; font-weight:700; letter-spacing:0.02em;");
-    const _backend = JF.Store.getConfig("backend") || "mock";
-    console.info(`%cBackend: ${_backend === "mock" ? "local device (mock) - MongoDB API planned" : _backend} · Mode: ${_backend === "mock" ? "development - mock data" : "connected"}`,
+    const _backend = JF.Store.homeOf && JF.Store.homeOf("animals") === "mongo" ? "mongo"
+      : (localStorage.getItem("jf_backend") || "mock");
+    console.info(`%cBackend: ${_backend === "mock" ? "local device (mock) - MongoDB API planned" : "MongoDB farm API (" + (JF.Store.getAdapter()?.endpoint || "") + ")"} · Mode: ${_backend === "mock" ? "development - mock data" : "connected"}`,
       "color:#45504a;");
   };
 

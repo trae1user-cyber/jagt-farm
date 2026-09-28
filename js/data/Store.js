@@ -176,9 +176,20 @@ JF.Store = (function () {
     groups: wrapEntity("groups"),
   };
 
-  // Auto-initialize from localStorage preference (defaults to mock for first load)
+  // Auto-initialize from localStorage preference. Default is the MongoDB farm
+  // API (endpoint+token are baked into MongoApiAdapter), falling back to the
+  // device store only when the API is unreachable - checked asynchronously.
   const savedBackend = localStorage.getItem("jf_backend");
-  init(savedBackend || "mock");
+  if (savedBackend) {
+    init(savedBackend);
+  } else {
+    init("mongo");
+    // If the baked-in API cannot be reached, drop to the offline device store.
+    dataAdapter.testConnection?.().catch(() => {
+      if (localStorage.getItem("jf_backend")) return; // user chose something meanwhile
+      init("mock");
+    });
+  }
 
   return api;
 })();

@@ -97,6 +97,16 @@ JF.Views.Settings = (function () {
       value: currentEndpoint
     });
 
+    // Farm API token (MONGO_TOKEN set in Render) - stored separately from the URL.
+    const tokenInput = JF.Utils.el("input", {
+      class: "input",
+      id: "cfg-api-token",
+      type: "text",
+      placeholder: "The MONGO_TOKEN value from Render (leave empty if none)",
+      value: (() => { try { return localStorage.getItem("jf_api_token") || ""; } catch (e) { return ""; } })(),
+      autocomplete: "off"
+    });
+
     const livePill = JF.PhotoUpload.backendLive()
       ? JF.Utils.el("span", { class: "badge badge--success", style: "margin-left:8px" }, "LIVE - photos upload to the server")
       : JF.Utils.el("span", { class: "badge badge--info", style: "margin-left:8px" }, "Offline mode - photos stay on device");
@@ -117,7 +127,7 @@ JF.Views.Settings = (function () {
         }
         try {
           const adapter = new JF.Data.MongoApiAdapter();
-          adapter.configure({ endpoint: url });
+          adapter.configure({ endpoint: url, token: tokenInput.value.trim() });
           const ping = await adapter.testConnection();
           statusBadge.textContent = `✅ Connection Successful! MongoDB: ${ping?.database || "connected"}`;
           statusBadge.style.color = "var(--color-success-700)";
@@ -155,7 +165,7 @@ JF.Views.Settings = (function () {
           if (!total) { statusBadge.textContent = "This device has no records to upload yet."; return; }
           statusBadge.textContent = `⏳ Uploading ${total} records across ${Object.keys(dump).length} collections...`;
           const adapter = new JF.Data.MongoApiAdapter();
-          adapter.configure({ endpoint: url });
+          adapter.configure({ endpoint: url, token: tokenInput.value.trim() });
           const res = await adapter.seed(dump);
           statusBadge.textContent = `✅ Uploaded ${res?.imported ?? total} records to MongoDB.`;
           statusBadge.style.color = "var(--color-success-700)";
@@ -177,7 +187,7 @@ JF.Views.Settings = (function () {
         statusBadge.style.color = "var(--color-ink-500)";
         try {
           const adapter = new JF.Data.MongoApiAdapter();
-          adapter.configure({ endpoint: url });
+          adapter.configure({ endpoint: url, token: tokenInput.value.trim() });
           const r = await adapter.verify();
           const lines = (r.checks || []).map((c) => `${c.ok ? "✅" : "❌"} <b>${c.check}</b> — ${c.detail}`);
           statusBadge.innerHTML = `${r.ok ? "✅ Everything is wired up" : "⚠️ Some checks failed"} (${r.elapsedMs} ms)<br>${lines.join("<br>")}`;
@@ -285,6 +295,11 @@ JF.Views.Settings = (function () {
           JF.Utils.el("label", { class: "field__label" }, "Active Data Store"),
           backendSelect,
           JF.Utils.el("div", { class: "field__hint" }, "Choose whether the app runs offline on this device, or syncs live to your MongoDB database through the farm's Node.js API (hosted on Render)."),
+        ]),
+        JF.Utils.el("div", { class: "field" }, [
+          JF.Utils.el("label", { class: "field__label" }, "Farm API Token"),
+          tokenInput,
+          JF.Utils.el("div", { class: "field__hint" }, "The MONGO_TOKEN value from Render > your service > Environment. Copy it exactly (use Render's copy icon). It is the password that lets this device use the API."),
         ]),
         JF.Utils.el("div", { class: "field" }, [
           JF.Utils.el("label", { class: "field__label" }, "Farm API URL (Node.js + MongoDB)"),
@@ -453,8 +468,11 @@ JF.Views.Settings = (function () {
       if (urlIn) {
         const urlVal = urlIn.value.trim();
         JF.Store.setConfig("api_endpoint", urlVal);
+        const tokIn = document.getElementById("cfg-api-token");
+        const tokVal = tokIn ? tokIn.value.trim() : "";
+        try { localStorage.setItem("jf_api_token", tokVal); } catch (e) {}
         const ad = JF.Store.getAdapter();
-        if (ad && ad.configure) ad.configure({ endpoint: urlVal });
+        if (ad && ad.configure) ad.configure({ endpoint: urlVal, token: tokVal });
       }
 
       const pairs = [
