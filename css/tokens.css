@@ -1,65 +1,82 @@
 :root {
-  /* ===== Cream x Dairy-Green palette (cute modern dairy look) ===== */
-  /* Surfaces: warm cream / soft butter */
-  --color-bg: #faf6ec;
-  --color-bg-soft: #f3ecda;
-  --color-bg-elevated: #fffdf6;
-  --color-bg-sunken: #efe6d2;
-  --color-bg-inverse: #16382b;
+  /* ===== Dairy-Green x Cream palette (matches the Jagt Farm mockup) ===== */
+  /* Surfaces: soft cream */
+  --color-bg: #f7f5ec;
+  --color-bg-soft: #eff0e2;
+  --color-bg-elevated: #ffffff;
+  --color-bg-sunken: #eef0e4;
+  --color-bg-inverse: #14351f;
 
-  /* Ink: deep forest-brown text on cream */
-  --color-ink-900: #22271f;
-  --color-ink-700: #33402f;
-  --color-ink-500: #5c6653;
-  --color-ink-400: #7d8771;
-  --color-ink-300: #a8b096;
-  --color-ink-200: #ccd2bd;
-  --color-ink-100: #e4e8d8;
-  --color-ink-50:  #f1f4e8;
+  /* Ink: deep green-charcoal text */
+  --color-ink-900: #1e2b22;
+  --color-ink-700: #33463a;
+  --color-ink-500: #5d7263;
+  --color-ink-400: #7d9083;
+  --color-ink-300: #a7b8ac;
+  --color-ink-200: #ccd8ce;
+  --color-ink-100: #e2eae3;
+  --color-ink-50:  #f0f4f0;
 
-  /* Accent: fresh dairy green */
-  --color-accent-900: #0f2f22;
-  --color-accent-800: #16382b;
-  --color-accent-700: #1d4d38;
-  --color-accent-600: #26644a;
-  --color-accent-500: #2f7d5c;
-  --color-accent-400: #58a381;
-  --color-accent-300: #8fc7ab;
-  --color-accent-200: #c4e4d3;
-  --color-accent-100: #e2f2e9;
+  /* Accent: dairy green */
+  --color-accent-900: #0f2b1a;
+  --color-accent-800: #14351f;
+  --color-accent-700: #1c4a2c;
+  --color-accent-600: #256038;
+  --color-accent-500: #2f7a46;
+  --color-accent-400: #55a06a;
+  --color-accent-300: #8fc7a0;
+  --color-accent-200: #c4e4cf;
+  --color-accent-100: #e2f2e8;
   --color-accent-50:  #f0f8f3;
 
-  /* Punjab festive: phulkari magenta + marigold + chili red (kept for events) */
-  --color-oxblood-900: #4d0f2f;
-  --color-oxblood-700: #86184f;
-  --color-oxblood-500: #b92473;
-  --color-oxblood-300: #e070a8;
-  --color-oxblood-100: #f7d3e6;
+  /* Pastel stat-card tints */
+  --tint-green-bg: #e7f6ea;  --tint-green-ink: #1c4a2c;
+  --tint-gold-bg: #fdf3d8;   --tint-gold-ink: #8a5c0c;
+  --tint-pink-bg: #fde4e4;   --tint-pink-ink: #a03030;
+  --tint-gray-bg: #eef0ef;   --tint-gray-ink: #4a5a50;
+  --tint-purple-bg: #f3e8fd; --tint-purple-ink: #6d3aa8;
+  --tint-blue-bg: #e4eefc;   --tint-blue-ink: #2b5aa8;
 
-  --color-wheat-900: #5d3d05;
-  --color-wheat-700: #96660a;
-  --color-wheat-500: #cf9110;
-  --color-wheat-300: #f2c14e;
-  --color-wheat-100: #fbedc9;
+  /* Alerts & events */
+  --color-oxblood-900: #58151a;
+  --color-oxblood-700: #a03030;
+  --color-oxblood-500: #c94b4b;
+  --color-oxblood-300: #e58f8f;
+  --color-oxblood-100: #fde4e4;
 
-  --color-danger-700: #9a2b2b;
-  --color-danger-500: #c94040;
-  --color-danger-100: #f8d7d7;
+  --color-wheat-900: #553505;
+  --color-wheat-700: #8a5c0c;
+  --color-wheat-500: #c9962b;
+  --color-wheat-300: #eec967;
+  --color-wheat-100: #fdf3d8;
 
-  --color-warning-700: #8a5a0f;
-  --color-warning-500: #d6931e;
-  --color-warning-100: #fae9c3;
+  --color-danger-700: #a03030;
+  --color-danger-500: #c94b4b;
+  --color-danger-100: #fde4e4;
 
-  --color-success-700: #1a5a30;
-  --color-success-500: #2e8a4f;
-  --color-success-100: #d4ecd9;
+  --color-warning-700: #8a5c0c;
+  --color-warning-500: #c9962b;
+  --color-warning-100: #fdf3d8;
 
-  /* Brand threads: dairy green + marigold + soft chili-orange */
-  --brand-magenta: #b92473;
-  --brand-marigold: #f2c14e;
-  --brand-chili: #e2703a;
-  --brand-leather: #1d4d38;
-  --brand-denim: #26644a;
+  --color-success-700: #1c4a2c;
+  --color-success-500: #2f7a46;
+  --color-success-100: #e2f2e8;
+
+  --color-info-700: #2b5aa8;
+  --color-info-500: #4a7ec9;
+  --color-info-100: #e4eefc;
+
+  --color-violet-700: #6d3aa8;
+  --color-violet-500: #8f5ac9;
+  --color-violet-100: #f3e8fd;
+
+  /* Brand */
+  --brand-magenta: #c94b4b;
+  --brand-marigold: #eec967;
+  --brand-chili: #c94b4b;
+  --brand-leather: #1c4a2c;
+  --brand-denim: #2b5aa8;
+  --brand-green: #2f7a46;
 
   --space-1: 4px;
   --space-2: 8px;
@@ -72,20 +89,21 @@
   --space-9: 96px;
 
   --radius-sm: 8px;
-  --radius-md: 14px;
-  --radius-lg: 20px;
-  --radius-xl: 26px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 22px;
   --radius-full: 999px;
 
-  --shadow-xs: 0 1px 2px rgba(22, 56, 43, 0.05);
-  --shadow-sm: 0 2px 10px rgba(22, 56, 43, 0.06);
-  --shadow-md: 0 8px 26px rgba(22, 56, 43, 0.08);
-  --shadow-lg: 0 16px 50px rgba(22, 56, 43, 0.11);
-  --shadow-xl: 0 32px 84px rgba(22, 56, 43, 0.16);
-  --shadow-inner: inset 0 1px 0 rgba(255,255,255,0.65);
+  --shadow-xs: 0 1px 2px rgba(20, 53, 31, 0.05);
+  --shadow-sm: 0 2px 10px rgba(20, 53, 31, 0.06);
+  --shadow-md: 0 8px 26px rgba(20, 53, 31, 0.08);
+  --shadow-lg: 0 16px 50px rgba(20, 53, 31, 0.11);
+  --shadow-xl: 0 32px 84px rgba(20, 53, 31, 0.16);
+  --shadow-inner: inset 0 1px 0 rgba(255,255,255,0.7);
 
-  --font-sans: "Bitter", "Space Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-display: "Bitter", "Space Grotesk", Georgia, serif;
+  --font-sans: "Bitter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-display: "Playfair Display", Georgia, serif;
+  --font-script: "Dancing Script", "Segoe Script", cursive;
   --font-serif: Georgia, "Times New Roman", serif;
   --font-mono: "SF Mono", Menlo, Consolas, monospace;
 
@@ -112,9 +130,9 @@
   --tracking-wide: 0.04em;
   --tracking-widest: 0.14em;
 
-  --sidebar-width: 288px;
+  --sidebar-width: 232px;
   --sidebar-width-collapsed: 84px;
-  --topbar-height: 72px;
+  --topbar-height: 64px;
 
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
   --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);

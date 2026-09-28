@@ -155,6 +155,8 @@ JF.Utils = (function () {
       document: '<path d="M6 3h8l6 6v12a1 1 0 01-1 1H6a1 1 0 01-1-1V4a1 1 0 011-1z"/>',
       eye: '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z"/><circle cx="12" cy="12" r="3"/>',
       download: '<path d="M12 3v12M6 11l6 6 6-6M4 21h16"/>',
+      milk: '<path d="M5 3h14M7 3l1.5 5L6 12l1 9h10l1-9-2.5-4L17 3"/><path d="M9.5 8h5"/>',
+      weather: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4 12H2M22 12h-2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19"/>',
       pregnancy: '<path d="M12 4a4 4 0 00-4 4v3a4 4 0 003 3.9V16a3 3 0 003 3h0a3 3 0 003-3v-1.1A4 4 0 0016 11V8a4 4 0 00-4-4z"/><line x1="8" y1="21" x2="16" y2="21"/>',
       baby2: '<path d="M10 5a2 2 0 114 0M8 13c-1-2 1-4 4-4s5 2 4 4c-3 2-5 2-4 0zM6 14h12l-2 8H8z"/>',
       calf: '<path d="M2 17c0-1.5 1.5-3 4-3h12c2.5 0 4 1.5 4 3v2H2zM6 14c0-3 2-6 6-6s6 3 6 6"/><circle cx="9" cy="10" r="1" fill="currentColor"/><circle cx="15" cy="10" r="1" fill="currentColor"/>',

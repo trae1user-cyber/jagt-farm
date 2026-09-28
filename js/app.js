@@ -67,6 +67,15 @@ JF.App = (function () {
     });
   };
 
+  // Sidebar photo footer (photo cropped from the farm's own banner image)
+  const photo = document.getElementById("sidebar-photo");
+  if (photo) {
+    const img = new Image();
+    img.onload = () => { photo.style.backgroundImage = `url('${img.src}')`; };
+    img.onerror = () => { photo.style.display = "none"; };
+    img.src = "assets/sidebar-cow.jpg";
+  }
+
   const parseHash = () => {
     const raw = (location.hash || "#dashboard").replace(/^#/, "");
     const parts = raw.split("/").filter(Boolean);

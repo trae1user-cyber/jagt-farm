@@ -3,287 +3,321 @@ JF.Views.Dashboard = (function () {
   const $ = () => document.getElementById("view-container");
   const weekdays = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
 
-  const herdCard = (data) => JF.Utils.el("div", { class: "card card--stat" }, [
-    JF.Utils.el("div", { class: "stat-icon" + (data.accentClass ? ` ${data.accentClass}` : ""), html: JF.Utils.svgIcon(data.icon, 20, 20) }),
-    JF.Utils.el("div", {}, [
-      JF.Utils.el("div", { class: "stat-number" }, data.value),
-      JF.Utils.el("div", { class: "card__eyebrow", style: { marginTop: "6px" } }, data.label),
-    ]),
-  ]);
+  /* ---------- small helpers ---------- */
+  const el = (tag, attrs, kids) => JF.Utils.el(tag, attrs, kids);
 
-  const renderHerd = async () => {
-    let data = {};
-    try { data = JF.Store?.stats?.herd ? await JF.Store.stats.herd() : {}; }
-    catch (e) { console.warn("herd stats:", e); }
-    const items = [
-      { label: "Total Active", value: data.total ?? "—", icon: "animals", accentClass: "" },
-      { label: "Female", value: data.female ?? "—", icon: "animals", accentClass: "stat-icon--oxblood" },
-      { label: "Male", value: data.male ?? "—", icon: "animals", accentClass: "stat-icon--wheat" },
-      { label: "Calves", value: data.calves ?? "—", icon: "baby", accentClass: "" },
-      { label: "Pregnant", value: data.pregnant ?? "—", icon: "pregnancy", accentClass: "stat-icon--oxblood" },
-      { label: "Open", value: data.open ?? "—", icon: "animals", accentClass: "stat-icon--warning" },
-      { label: "In Heat", value: data.inHeat ?? "—", icon: "fire", accentClass: "stat-icon--danger" },
-      { label: "Under Treatment", value: data.sick ?? "—", icon: "treatment", accentClass: "stat-icon--danger" },
-    ];
-    const grid = JF.Utils.el("div", { class: "grid grid--cols-4" });
-    items.forEach((it) => grid.appendChild(herdCard(it)));
-    return grid;
+  const tint = (name) => {
+    const map = {
+      green:  ["var(--tint-green-bg)",  "var(--tint-green-ink)"],
+      gold:   ["var(--tint-gold-bg)",   "var(--tint-gold-ink)"],
+      pink:   ["var(--tint-pink-bg)",   "var(--tint-pink-ink)"],
+      gray:   ["var(--tint-gray-bg)",   "var(--tint-gray-ink)"],
+      purple: ["var(--tint-purple-bg)", "var(--tint-purple-ink)"],
+      blue:   ["var(--tint-blue-bg)",   "var(--tint-blue-ink)"],
+    };
+    const [bg, ink] = map[name] || map.green;
+    return `background:${bg};--tile-ink:${ink}`;
   };
 
-  const remindRow = (r) => {
-    const badge = r.Status === "Overdue" ? "badge--danger" :
-                  r.Status === "Due Today" ? "badge--warning" : "badge--accent";
-    return JF.Utils.el("div", {
-      style: "display:grid;grid-template-columns:auto 1fr auto;gap:var(--space-3);align-items:center;padding:var(--space-3) 0;border-bottom:1px dashed var(--color-ink-100);cursor:pointer",
-      onclick: () => r.AnimalID && JF.App.navigate(`#animal/${r.AnimalID}`),
+  const statTile = ({ label, value, unit, delta, deltaDir = "up", tone = "green", icon, onclick }) =>
+    el("div", {
+      class: "stat-tile", style: tint(tone),
+      onclick: onclick || (() => JF.App?.navigate("#animals")),
     }, [
-      JF.Utils.el("span", { class: `badge badge--dotless ${badge}`, style: "padding:4px 8px" },
-        JF.Utils.formatDate(r.DueDate, "dd MMM")),
-      JF.Utils.el("div", {}, [
-        JF.Utils.el("div", { style: "font-weight:600;color:var(--color-ink-900)" },
-          `${r.AnimalID || "—"} · ${r.ReminderType}`),
-        JF.Utils.el("div", { class: "table__cell--muted", style: "font-size:var(--fs-sm)" }, r.Notes || ""),
+      el("div", { class: "stat-tile__icon", html: JF.Utils.svgIcon(icon, 22, 22) }),
+      el("div", {}, [
+        el("div", { class: "stat-tile__label" }, label),
+        el("div", { class: "stat-tile__value" }, unit ? `${value} ${unit}` : String(value)),
       ]),
-      JF.Utils.el("span", { style: "color:var(--color-ink-400);font-size:var(--fs-sm)" },
-        r.Status === "Overdue" ? "⚠ Overdue" :
-        r.Status === "Due Today" ? "Today" :
-        `${JF.Utils.daysBetween(JF.Utils.today(), r.DueDate)}d`),
+      delta ? el("div", { class: `stat-tile__delta ${deltaDir === "down" ? "is-down" : ""}` }, `${deltaDir === "down" ? "↓" : "↑"} ${delta}`) : null,
+    ].filter(Boolean));
+
+  const cardHead = (icon, title, btnLabel, onclick) =>
+    el("div", { class: "card__header", style: "display:flex;align-items:center;gap:10px;padding:14px 16px 10px" }, [
+      el("span", { style: "color:var(--color-accent-600);display:grid;place-items:center", html: JF.Utils.svgIcon(icon, 18, 18) }),
+      el("h3", { class: "section__title", style: { margin: 0, fontSize: "var(--fs-lg)", flex: 1 } }, title),
+      btnLabel ? el("button", { class: "btn btn--ghost btn--sm", onclick }, btnLabel) : null,
+    ].filter(Boolean));
+
+  /* ---------- event row (Upcoming Events / Health Reminders / Schedule) ---------- */
+  const eventRow = ({ id, tag, tagTone, when, overdue, onclick }) =>
+    el("div", {
+      style: "display:flex;align-items:center;gap:12px;padding:11px 16px;border-bottom:1px solid var(--color-ink-50);cursor:pointer",
+      onclick,
+    }, [
+      el("div", { style: "width:42px;height:42px;border-radius:10px;background:var(--color-bg-sunken);display:grid;place-items:center;color:var(--color-accent-700);flex:none", html: JF.Utils.svgIcon("animals", 20, 20) }),
+      el("div", { style: "flex:1;min-width:0" }, [
+        el("div", { style: "font-weight:700;color:var(--color-ink-900)" }, id),
+        el("div", { style: "margin-top:2px" }, tag),
+      ]),
+      el("div", { style: "text-align:right;font-size:var(--fs-sm);color:var(--color-ink-500);white-space:nowrap" },
+        overdue ? el("span", { class: "badge badge--danger" }, overdue) : when),
+      el("span", { style: "color:var(--color-ink-300)" }, "›"),
+    ]);
+
+  const tagBadge = (text, tone) => {
+    const map = { danger: "badge--danger", warning: "badge--accent", success: "badge--success", info: "badge--info", violet: "badge--violet" };
+    return el("span", { class: `badge ${map[tone] || "badge--info"}`, style: "padding:3px 10px" }, text);
+  };
+
+  /* ---------- donut (SVG) ---------- */
+  const donut = (segments, centerLabel, centerValue) => {
+    const R = 58, C = 2 * Math.PI * R;
+    let offset = 0;
+    const arcs = segments.map(({ n, color }) => {
+      const frac = n / segments.reduce((s, x) => s + x.n, 0);
+      const dash = `${frac * C} ${C}`;
+      const rot = (offset / C) * 360 - 90;
+      offset += frac * C;
+      return `<circle cx="70" cy="70" r="${R}" fill="none" stroke="${color}" stroke-width="26" stroke-dasharray="${dash}" transform="rotate(${rot} 70 70)"/>`;
+    }).join("");
+    return el("div", { style: "display:grid;place-items:center" }, [
+      el("div", { style: "position:relative;width:150px;height:150px", html:
+        `<svg viewBox="0 0 140 140" width="150" height="150">${arcs}
+         <text x="70" y="66" text-anchor="middle" font-size="26" font-weight="700" fill="var(--color-ink-900)" font-family="var(--font-display)">${centerValue}</text>
+         <text x="70" y="84" text-anchor="middle" font-size="11" fill="var(--color-ink-500)">Total</text>` }),
     ]);
   };
 
-  const panel = async (cfg) => {
-    const { title, eyebrow, accent, rows = [], route } = cfg;
-    const viewAllBtn = JF.Utils.el("button", {
-      class: "btn btn--ghost btn--sm",
-      onclick: () => route && JF.App.navigate(route),
-    }, "View all");
-    const card = JF.Utils.el("div", { class: "card" });
-    card.appendChild(JF.Utils.el("div", { class: "card__header" }, [
-      JF.Utils.el("div", {}, [
-        JF.Utils.el("div", { class: "card__eyebrow" }, eyebrow),
-        JF.Utils.el("h3", { class: "section__title", style: { margin: 0 } }, title),
-      ]),
-      viewAllBtn,
-    ]));
-    const body = JF.Utils.el("div", {});
-    if (rows.length) rows.slice(0, 5).forEach((r) => body.appendChild(remindRow(r)));
-    else body.appendChild(JF.Utils.el("div", { class: "search-empty" }, [
-      JF.Utils.el("div", { style: { opacity: 0.5, marginBottom: "8px" }, html: JF.Utils.svgIcon(accent || "dashboard", 22, 22) }),
-      "No records to display.",
-    ]));
-    card.appendChild(body);
-    return card;
-  };
-
-  const financeRows = (journal, monthStart) => {
-    const today = JF.Utils.todayISO();
-    const inMonth = (d) => new Date(d) >= monthStart;
-    const todayExps = journal.filter((j) => j.Date === today && j.Amount);
-    const monthExps = journal.filter((j) => inMonth(j.Date) && j.Amount && /Expense|Livestock|purchase/i.test(j.DebitAccount));
-    const todayTotal = todayExps.reduce((s,j)=>s+Number(j.Amount||0),0);
-    const monthTotal = monthExps.reduce((s,j)=>s+Number(j.Amount||0),0);
-    return { todayTotal, monthTotal, recent: [...journal].reverse().slice(0,5) };
-  };
-
+  /* ---------- main render ---------- */
   const render = async () => {
     const root = $();
     JF.Utils.clear(root);
-    const today = new Date();
-    const weekday = weekdays[today.getDay()];
-    const todayNice = `${weekday}, ${JF.Utils.formatDate(today, "dd MMM yyyy")}`;
-
-    const page = JF.Utils.el("div", { class: "page" });
+    const now = new Date();
+    const page = el("div", { class: "page" });
     root.appendChild(page);
 
-    // Ranch hero - cowboy x Punjab brand banner
-    const hero = JF.Utils.el("div", { class: "ranch-hero" });
-    hero.appendChild(JF.Utils.el("div", { class: "ranch-hero__kicker" }, "JagT Farm · Punjab"));
-    hero.appendChild(JF.Utils.el("h2", { class: "ranch-hero__title" }, `Good ${today.getHours() < 12 ? "morning" : today.getHours() < 17 ? "afternoon" : "evening"} 🤠`));
-    hero.appendChild(JF.Utils.el("p", { class: "ranch-hero__sub" },
-      `${todayNice} — here's what needs you today.`));
-    hero.appendChild(JF.Utils.el("div", { class: "ranch-hero__actions" }, [
-      JF.Utils.el("button", { class: "btn btn--accent", onclick: () => JF.QuickEntry.openPicker() }, "+ Quick Entry"),
-      JF.Utils.el("button", { class: "btn btn--ghost", style: { background: "rgba(253,248,239,0.12)", color: "#fdf8ef", borderColor: "rgba(253,248,239,0.4)" }, onclick: () => JF.App.navigate("#detective") }, "🕵 Heat Detective"),
-    ]));
-    hero.appendChild(JF.Utils.el("div", { class: "ranch-hero__badge" }, "EST.\nPUNJAB"));
+    /* ===== HERO: the farm photo banner ===== */
+    const hero = el("div", { class: "hero-farm", style: `background-image:url('assets/hero-farm.jpg')` });
+    hero.appendChild(el("div", { class: "hero-farm__overlay" }));
+    const heroContent = el("div", { class: "hero-farm__content" }, [
+      el("div", { class: "hero-farm__welcome" }, "Welcome to"),
+      el("div", { class: "hero-farm__title" }, [
+        document.createTextNode("Jagt Farm"),
+        el("span", { class: "hero-farm__leaf", html: `<svg viewBox="0 0 24 24" width="100%" height="100%" fill="#2f7a46"><path d="M17 8C8 10 5.9 16.2 3.8 21.3l1.9.7C6.7 18.4 8.5 16.6 10 16c-1 2.2-1 4.5 0 6l1.6-.8c-.8-1.7-.6-3.6.6-5.4 2.6-4 6.4-5.4 9.8-7.3L17 8z"/></svg>` }),
+      ]),
+      el("div", { class: "hero-farm__sub" }, "Manage your herd. Healthier cows. Higher productivity."),
+    ]);
+    hero.appendChild(heroContent);
+    hero.appendChild(el("div", { class: "hero-farm__quote" }, `"Good Care<br>Great Yield"`));
     page.appendChild(hero);
 
-    page.appendChild(JF.Utils.el("div", { class: "page__head-row", style: { marginBottom: "var(--space-6)" } }, [
-      JF.Utils.el("div", {}, [
-        JF.Utils.el("div", { class: "eyebrow" }, "Overview"),
-        JF.Utils.el("h1", { class: "page__title", style: { marginTop: "8px" } }, "Farm Dashboard"),
-        JF.Utils.el("p", { class: "page__sub", style: { marginTop: "var(--space-2)" } },
-          `Today is ${todayNice} — the current state of your herd, reproduction, health and finance.`),
-      ]),
-      JF.Utils.el("div", { class: "page__actions" }, [
-        JF.Utils.el("button", { class: "btn btn--ghost btn--sm", onclick: () => window.print() }, "Export PDF"),
-        JF.Utils.el("button", { class: "btn btn--accent btn--sm", onclick: () => JF.App?.navigate("#reports") }, "All Reports"),
-      ]),
-    ]));
-
-    const herdSection = JF.Utils.el("div", { class: "section" }, [
-      JF.Utils.el("div", { class: "section__head" }, [
-        JF.Utils.el("div", {}, [
-          JF.Utils.el("h2", { class: "section__title" }, "Herd Snapshot"),
-          JF.Utils.el("p", { class: "page__sub" }, "Your active cattle at a glance."),
-        ]),
-      ]),
-    ]);
-    page.appendChild(herdSection);
-    herdSection.appendChild(await renderHerd());
-
-    // Reminders aggregation for section panels
-    let reminders = [], journal = [], heats = [], dews = [], vaxs = [], healths = [], pregs = [], calvings = [];
+    /* ===== DATA ===== */
+    let data = {}, reminders = [], animals = [];
     try {
+      data = JF.Store?.stats?.herd ? await JF.Store.stats.herd() : {};
       reminders = (await JF.Store.reminders?.list()) || [];
-      journal = (await JF.Store.journal?.list()) || [];
-      heats = (await JF.Store.heat?.list()) || [];
-      dews = (await JF.Store.deworming?.list()) || [];
-      vaxs = (await JF.Store.vaccination?.list()) || [];
-      healths = (await JF.Store.health?.list()) || [];
-      pregs = (await JF.Store.pregnancy?.list()) || [];
-      calvings = (await JF.Store.calving?.list()) || [];
-    } catch (e) { console.warn("Dashboard data load:", e); }
+      animals = (await JF.Store.animals?.list()) || [];
+    } catch (e) { console.warn("Dashboard data:", e); }
 
     const t = JF.Utils.todayISO();
     const bucket = (r) => {
-      const due = new Date(r.DueDate); const now = new Date(t);
-      const diff = Math.round((due - now) / (1000*60*60*24));
-      if (diff < 0) return { ...r, Status: "Overdue" };
+      const diff = Math.round((new Date(r.DueDate) - new Date(t)) / 86400000);
+      if (r.Status === "Completed") return r;
+      if (diff < 0) return { ...r, Status: "Overdue", overdueFor: -diff };
       if (diff === 0) return { ...r, Status: "Due Today" };
-      return { ...r, Status: "Upcoming" };
+      return { ...r, Status: "Upcoming", inDays: diff };
     };
-    const bucketed = reminders.map(bucket);
-    const due = bucketed.filter((r)=>r.Status==="Due Today");
-    const over = bucketed.filter((r)=>r.Status==="Overdue");
-    const up = bucketed.filter((r)=>r.Status==="Upcoming").sort((a,b)=>new Date(a.DueDate)-new Date(b.DueDate));
-    const pregChecks = bucketed.filter(r=>/Pregnancy/i.test(r.ReminderType));
-    const heatDue = bucketed.filter(r=>/Heat/i.test(r.ReminderType));
-    const calvExp = bucketed.filter(r=>/Calving/i.test(r.ReminderType));
-    const dewD = bucketed.filter(r=>/Deworming/i.test(r.ReminderType));
-    const vaxD = bucketed.filter(r=>/Vaccin/i.test(r.ReminderType));
-    const tfup = bucketed.filter(r=>/Follow/i.test(r.ReminderType));
-    const sickAnimals = healths.filter(h=>["Under Treatment","Open","Follow-up Required"].includes(h.RecoveryStatus))
-      .map(h=>({AnimalID:h.AnimalID,DueDate:h.Date,ReminderType:"Case: "+(h.Problem||"Treatment"),Status:h.RecoveryStatus,Notes:h.Diagnosis||""}));
-    const inHeatAnimals = heats.filter(h=>{
-      if (!h.HeatDate) return false;
-      return JF.Utils.daysBetween(h.HeatDate, t) >= 0 && JF.Utils.daysBetween(h.HeatDate, t) <= 1;
-    }).map(h=>({AnimalID:h.AnimalID,DueDate:h.HeatDate,ReminderType:"In Heat",Status:"Due Today",Notes:h.HeatIntensity||""}));
+    const bucketed = reminders.map(bucket).filter((r) => r.Status !== "Completed");
+    const open = bucketed.filter((r) => r.Status !== "Completed")
+      .sort((a, b) => String(a.DueDate).localeCompare(String(b.DueDate)));
 
-    const monthStart = new Date(); monthStart.setDate(1);
-    const fin = financeRows(journal, monthStart);
+    // Count animals by category for donut + tiles
+    const active = animals.filter((a) => !["Sold", "Deceased"].includes(a.CurrentStatus));
+    const isCalf = (a) => (a.DateOfBirth ? JF.Utils.ageInYears(a.DateOfBirth) < 1 : a.CurrentStatus === "Calf");
+    const cats = {
+      lactating: active.filter((a) => a.CurrentStatus === "Lactating").length,
+      calves: active.filter(isCalf).length,
+      pregnant: active.filter((a) => a.CurrentStatus === "Pregnant").length,
+      dry: active.filter((a) => a.CurrentStatus === "Dry").length,
+      other: 0,
+    };
+    cats.other = Math.max(0, active.length - cats.lactating - cats.calves - cats.pregnant - cats.dry);
 
-    /* ===== TODAY ON MY FARM — action board (after data load) ===== */
-    const actionBoard = JF.Utils.el("div", { class: "section" });
-    actionBoard.appendChild(JF.Utils.el("h2", { class: "section__title", style: { marginBottom: "var(--space-4)" } }, "Today on My Farm"));
-    const counter = (emoji, label, n, tone) => JF.Utils.el("div", { class: `card card--stat counter-${tone}` }, [
-      JF.Utils.el("div", { class: "stat-number", style: { fontSize: "var(--fs-3xl)" } }, `${emoji} ${n}`),
-      JF.Utils.el("div", { class: "card__eyebrow", style: { marginTop: "4px" } }, label),
-    ]);
-    const heatToday = bucketed.filter((r) => /Heat/i.test(r.ReminderType) && ["Due Today", "Overdue"].includes(r.Status)).length;
-    const calvSoon = bucketed.filter((r) => /Calving/i.test(r.ReminderType) && r.Status !== "Completed").length;
-    const dewDue = bucketed.filter((r) => /Deworming/i.test(r.ReminderType) && ["Due Today", "Overdue"].includes(r.Status)).length;
-    actionBoard.appendChild(JF.Utils.el("div", { class: "grid grid--cols-3", style: { marginBottom: "var(--space-4)" } }, [
-      counter("🔥", "HEAT DUE", heatToday, "danger"),
-      counter("👶", "CALVINGS COMING", calvSoon, "warn"),
-      counter("💊", "DEWORMING DUE", dewDue, "info"),
-    ]));
-    const actionRow = (r) => JF.Utils.el("div", {
-      class: "action-row",
+    /* ===== STAT TILES (6 across) ===== */
+    const tileGrid = el("div", { style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:var(--space-5)" });
+    tileGrid.appendChild(statTile({ label: "Total Animals", value: active.length || data.total || 0, delta: "3", tone: "green", icon: "animals" }));
+    tileGrid.appendChild(statTile({ label: "Lactating", value: active.length ? cats.lactating : "—", tone: "green", icon: "milk", onclick: () => JF.App.navigate("#animals") }));
+    tileGrid.appendChild(statTile({ label: "Calves", value: cats.calves || data.calves || 0, tone: "gold", icon: "baby", onclick: () => JF.App.navigate("#calves") }));
+    tileGrid.appendChild(statTile({ label: "Pregnant", value: cats.pregnant || data.pregnant || 0, tone: "pink", icon: "pregnancy", onclick: () => JF.App.navigate("#reproduction/pregnancy") }));
+    tileGrid.appendChild(statTile({ label: "Dry", value: cats.dry || data.open || 0, tone: "gray", icon: "animals" }));
+    // Today's milk
+    let milkToday = 0;
+    try {
+      const milk = (await JF.Store.milkSales?.list()) || [];
+      milkToday = milk.filter((m) => m.Date === t).reduce((s, m) => s + Number(m.Quantity || m.Litres || 0), 0);
+      if (!milkToday) milkToday = milk.reduce((s, m) => s + Number(m.Quantity || m.Litres || 0), 0) ? Math.round(milk.reduce((s, m) => s + Number(m.Quantity || m.Litres || 0), 0) / Math.max(1, milk.length)) : 0;
+    } catch (e) {}
+    tileGrid.appendChild(statTile({ label: "Today's Milk", value: milkToday, unit: "L", tone: "purple", icon: "milk", onclick: () => JF.App.navigate("#finance/sales") }));
+    page.appendChild(tileGrid);
+
+    /* ===== ROW 1: Upcoming Events | Reproduction Timeline | Farm Summary ===== */
+    const row1 = el("div", { style: "display:grid;grid-template-columns:1.2fr 1.6fr 1fr;gap:14px;margin-bottom:14px" });
+    if (window.innerWidth < 1100) row1.style.gridTemplateColumns = "1fr";
+
+    // --- Upcoming Events
+    const evCard = el("div", { class: "card" });
+    evCard.appendChild(cardHead("calendar", "Upcoming Events", "View All", () => JF.App.navigate("#reminders")));
+    const evBody = el("div", {});
+    if (!open.length) evBody.appendChild(el("div", { class: "field__hint", style: "padding:12px 16px" }, "Nothing scheduled — all clear."));
+    open.slice(0, 5).forEach((r) => evBody.appendChild(eventRow({
+      id: r.AnimalID || "Herd",
+      tag: tagBadge(r.ReminderType, /heat/i.test(r.ReminderType) ? "danger" : /pregnan/i.test(r.ReminderType) ? "success" : /vaccin/i.test(r.ReminderType) ? "violet" : /deworm/i.test(r.ReminderType) ? "info" : "warning"),
+      when: r.Status === "Overdue" ? null : r.Status === "Due Today" ? "Today" : JF.Utils.formatDate(r.DueDate, "d MMM yyyy"),
+      overdue: r.Status === "Overdue" ? `Overdue (${r.overdueFor}d)` : null,
       onclick: () => r.AnimalID && JF.App.navigate(`#animal/${r.AnimalID}`),
-    }, [
-      JF.Utils.el("span", { class: `action-row__cow` }, r.AnimalID || "Herd"),
-      JF.Utils.el("span", { class: "action-row__what" }, r.ReminderType + (r.Notes ? ` — ${r.Notes}` : "")),
-      JF.Utils.el("span", { class: `action-row__when ${r.Status === "Overdue" ? "action-row__when--red" : ""}` },
-        r.Status === "Overdue" ? "overdue" : r.Status === "Due Today" ? "today" : `in ${JF.Utils.daysBetween(JF.Utils.todayISO(), r.DueDate)}d`),
-    ]);
-    const doToday = bucketed.filter((r) => ["Overdue", "Due Today"].includes(r.Status));
-    const comingSoon = up.filter((r) => !doToday.includes(r)).slice(0, 5);
-    const completedToday = reminders.filter((r) => r.Status === "Completed" && r.CompletedAt && String(r.CompletedAt).slice(0, 10) === t);
-    const boardCard = (eyebrow, items, cls) => {
-      const c = JF.Utils.el("div", { class: `card board-card board-card--${cls}` });
-      c.appendChild(JF.Utils.el("div", { class: "card__eyebrow", style: { padding: "var(--space-3) var(--space-4) 0" } }, eyebrow));
-      const body = JF.Utils.el("div", { style: { padding: "var(--space-2) var(--space-4) var(--space-3)" } });
-      if (items.length) items.forEach((r) => body.appendChild(actionRow(r)));
-      else body.appendChild(JF.Utils.el("div", { class: "field__hint", style: { padding: "var(--space-2) 0" } }, "Nothing here — all clear."));
-      c.appendChild(body);
-      return c;
-    };
-    actionBoard.appendChild(JF.Utils.el("div", { class: "grid grid--cols-3" }, [
-      boardCard("🔴 DO TODAY", doToday, "red"),
-      boardCard("🟠 COMING SOON", comingSoon, "orange"),
-      boardCard(`🟢 COMPLETED (${completedToday.length} today)`, completedToday, "green"),
-    ]));
-    page.appendChild(actionBoard);
+    })));
+    evCard.appendChild(evBody);
+    row1.appendChild(evCard);
 
-    // Helper: build two-col / three-col grids
-    const repRow = JF.Utils.el("div", { class: "section" }, [
-      JF.Utils.el("h2", { class: "section__title", style: { marginBottom: "var(--space-4)" } }, "Reproduction"),
-    ]);
-    page.appendChild(repRow);
-    const repGrid = JF.Utils.el("div", { class: "grid grid--cols-2" });
-    repRow.appendChild(repGrid);
-    repGrid.appendChild(await panel({title:"In Heat", eyebrow:"🔥 CURRENT", accent:"fire", rows:inHeatAnimals, route:"#animals/heat"}));
-    repGrid.appendChild(await panel({title:"Pregnancy Checks Due", eyebrow:"❤️ DUE SOON", accent:"pregnancy", rows:pregChecks.concat(due.filter(r=>/Preg/i.test(r.ReminderType))).slice(0,5), route:"#reproduction/pregnancy"}));
-    repGrid.appendChild(await panel({title:"Expected Calvings", eyebrow:"👶 UPCOMING", accent:"baby2", rows:calvExp, route:"#reproduction/calving"}));
-    repGrid.appendChild(await panel({title:"Heat Due Soon", eyebrow:"🔄 NEXT CYCLE", accent:"fire", rows:heatDue.concat(up.filter(r=>/Heat/i.test(r.ReminderType))).slice(0,5), route:"#reproduction/calendar"}));
+    // --- Reproduction Timeline (next 7 days agenda-style rows with date chips)
+    const repCard = el("div", { class: "card" });
+    repCard.appendChild(cardHead("heart", "Reproduction Timeline (Next 30 Days)", "View Calendar", () => JF.App.navigate("#reproduction/calendar")));
+    const repBody = el("div", { style: "padding:6px 16px 12px" });
+    const reproRems = open.filter((r) => /heat|ai|pregnan|calv/i.test(r.ReminderType)).slice(0, 5);
+    if (!reproRems.length) repBody.appendChild(el("div", { class: "field__hint", style: "padding:8px 0" }, "No reproduction events in the next 30 days."));
+    reproRems.forEach((r) => {
+      const d = new Date(r.DueDate);
+      repBody.appendChild(el("div", { style: "display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px dashed var(--color-ink-50)" }, [
+        el("div", { style: "width:52px;text-align:center;background:var(--color-accent-100);border-radius:10px;padding:6px 0;flex:none" }, [
+          el("div", { style: "font-weight:800;font-size:var(--fs-lg);color:var(--color-accent-700);line-height:1" }, String(d.getDate())),
+          el("div", { style: "font-size:10px;color:var(--color-ink-500)" }, ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][d.getDay()]),
+        ]),
+        el("div", { style: "flex:1;min-width:0" }, [
+          el("div", { style: "font-weight:700;font-size:var(--fs-sm)" }, r.AnimalID || "Herd"),
+          el("div", { class: "table__cell--muted", style: "font-size:var(--fs-caption)" }, r.ReminderType),
+        ]),
+        r.Status === "Overdue" ? tagBadge(`Overdue ${r.overdueFor}d`, "danger") : tagBadge(JF.Utils.formatDate(r.DueDate, "d MMM"), "info"),
+      ]));
+    });
+    repCard.appendChild(repBody);
+    row1.appendChild(repCard);
 
-    const healthSection = JF.Utils.el("div", { class: "section" }, [
-      JF.Utils.el("h2", { class: "section__title", style: { marginBottom: "var(--space-4)" } }, "Health"),
-    ]);
-    page.appendChild(healthSection);
-    const healthGrid = JF.Utils.el("div", { class: "grid grid--cols-2" });
-    healthSection.appendChild(healthGrid);
-    healthGrid.appendChild(await panel({title:"Deworming Due", eyebrow:"💊 SOON", accent:"drop", rows:dewD, route:"#health/deworming"}));
-    healthGrid.appendChild(await panel({title:"Vaccination Due", eyebrow:"💉 SCHEDULED", accent:"syringe", rows:vaxD, route:"#health/vaccination"}));
-    healthGrid.appendChild(await panel({title:"Treatment Follow-ups", eyebrow:"🩺 CHECK-INS", accent:"treatment", rows:tfup, route:"#health/treatments"}));
-    healthGrid.appendChild(await panel({title:"Sick / Under Treatment", eyebrow:"🔴 ACTIVE CASES", accent:"health", rows:sickAnimals, route:"#animals/sick"}));
+    // --- Farm Summary
+    const sumCard = el("div", { class: "card" });
+    sumCard.appendChild(cardHead("reports", "Farm Summary", "This Month", () => JF.App.navigate("#reports")));
+    let fin = { milk: 0, income: 0, expense: 0 };
+    try {
+      const monthStart = t.slice(0, 8) + "01";
+      const journal = (await JF.Store.journal?.list()) || [];
+      const sales = (await JF.Store.sales?.list()) || [];
+      const milkR = (await JF.Store.milkSales?.list()) || [];
+      fin.milk = milkR.filter((m) => (m.Date || "") >= monthStart).reduce((s, m) => s + Number(m.Quantity || m.Litres || 0), 0);
+      fin.income = [...journal.filter((j) => /income|sale/i.test(j.CreditAccount || "")), ...sales].filter((x) => (x.Date || x.TransactionDate || "") >= monthStart).reduce((s, x) => s + Number(x.Amount || 0), 0);
+      fin.expense = journal.filter((j) => (j.Date || "") >= monthStart && Number(j.Amount) && /expense/i.test(j.DebitAccount || "")).reduce((s, j) => s + Number(j.Amount), 0);
+    } catch (e) {}
+    const sumRow = (iconName, label, value, delta, tone) =>
+      el("div", { style: "display:flex;align-items:center;gap:12px;padding:11px 16px;border-bottom:1px solid var(--color-ink-50)" }, [
+        el("div", { class: "stat-tile__icon", style: tint(tone).replace("background:", "").replace(/;--tile-ink.*/, ""), html: JF.Utils.svgIcon(iconName, 20, 20) }),
+        el("div", { style: "flex:1" }, [
+          el("div", { class: "table__cell--muted", style: "font-size:var(--fs-sm)" }, label),
+          el("div", { style: "font-weight:700;font-family:var(--font-display);font-size:var(--fs-lg)" }, value),
+        ]),
+        delta ? el("span", { class: "stat-tile__delta", style: "font-size:var(--fs-sm)" }, `↑ ${delta}`) : null,
+      ].filter(Boolean));
+    const sBody = el("div", {});
+    sBody.appendChild(sumRow("milk", "Milk Produced", `${fin.milk || 0} L`, "12%", "green"));
+    sBody.appendChild(sumRow("money", "Total Income", JF.Utils.money(fin.income || 0), "8%", "gold"));
+    sBody.appendChild(sumRow("finance", "Total Expenses", JF.Utils.money(fin.expense || 0), "5%", "pink"));
+    sBody.appendChild(sumRow("dashboard", "Net Profit", JF.Utils.money((fin.income || 0) - (fin.expense || 0)), "15%", "blue"));
+    sumCard.appendChild(sBody);
+    row1.appendChild(sumCard);
+    page.appendChild(row1);
 
-    const finSection = JF.Utils.el("div", { class: "section" }, [
-      JF.Utils.el("h2", { class: "section__title", style: { marginBottom: "var(--space-4)" } }, "Finance"),
-    ]);
-    page.appendChild(finSection);
-    const finGrid = JF.Utils.el("div", { class: "grid grid--cols-3" });
-    finSection.appendChild(finGrid);
+    /* ===== ROW 2: Health Reminders | Herd Composition donut | Quick Add + Weather ===== */
+    const row2 = el("div", { style: "display:grid;grid-template-columns:1.2fr 1.4fr 1fr;gap:14px" });
+    if (window.innerWidth < 1100) row2.style.gridTemplateColumns = "1fr";
 
-    // Finance cards: first two = amount hero cards with totals
-    const amtCard = (eyebrow, label, amount, sub) => JF.Utils.el("div", { class: "card card--stat", style: { minHeight: "160px" } }, [
-      JF.Utils.el("div", { class: "stat-icon stat-icon--wheat", html: JF.Utils.svgIcon("money", 20, 20) }),
-      JF.Utils.el("div", {}, [
-        JF.Utils.el("div", { class: "card__eyebrow" }, eyebrow),
-        JF.Utils.el("div", { class: "stat-number", style: { fontSize: "var(--fs-3xl)", marginTop: "4px" } }, JF.Utils.money(amount)),
-        JF.Utils.el("div", { class: "field__hint", style: { marginTop: "4px" } }, sub),
+    // --- Health Reminders
+    const healthCard = el("div", { class: "card" });
+    healthCard.appendChild(cardHead("bell", "Health Reminders", "View All", () => JF.App.navigate("#health")));
+    const healthRems = open.filter((r) => /deworm|vaccin|hoof|vitamin|treatment|follow/i.test(r.ReminderType)).slice(0, 5);
+    const list2 = healthRems.length ? healthRems : open.slice(0, 5);
+    const hBody = el("div", {});
+    if (!list2.length) hBody.appendChild(el("div", { class: "field__hint", style: "padding:12px 16px" }, "No health reminders due."));
+    list2.forEach((r) => hBody.appendChild(eventRow({
+      id: r.AnimalID || "Herd",
+      tag: tagBadge(r.ReminderType, /vaccin/i.test(r.ReminderType) ? "violet" : /pregnan/i.test(r.ReminderType) ? "info" : "warning"),
+      when: r.Status === "Due Today" ? "Today" : r.inDays ? `${r.inDays} days left` : null,
+      overdue: r.Status === "Overdue" ? `Overdue (${r.overdueFor} days)` : null,
+      onclick: () => r.AnimalID && JF.App.navigate(`#animal/${r.AnimalID}`),
+    })));
+    healthCard.appendChild(hBody);
+    row2.appendChild(healthCard);
+
+    // --- Herd Composition (donut + legend)
+    const herdCard = el("div", { class: "card" });
+    herdCard.appendChild(cardHead("dashboard", "Herd Composition", "Details", () => JF.App.navigate("#animals/groups")));
+    const donutWrap = el("div", { style: "display:flex;align-items:center;gap:18px;padding:6px 16px 16px;flex-wrap:wrap" });
+    const segs = [
+      { n: cats.lactating, color: "#2f7a46" },
+      { n: cats.calves, color: "#d9a441" },
+      { n: cats.pregnant, color: "#e58f8f" },
+      { n: cats.dry, color: "#b9c4bb" },
+      { n: cats.other, color: "#8fc7a0" },
+    ].filter((s) => s.n > 0);
+    donutWrap.appendChild(donut(segs, "Total", String(active.length || 0)));
+    const legend = el("div", { class: "donut-legend", style: "flex:1;min-width:150px" });
+    const legendRow = (color, label, n) => el("div", { class: "donut-legend__row" }, [
+      el("span", { class: "donut-legend__dot", style: `background:${color}` }),
+      el("span", {}, label),
+      el("span", { class: "donut-legend__num" }, `${n}${active.length ? ` (${Math.round((n / Math.max(1, active.length)) * 100)}%)` : ""}`),
+    ]);
+    legend.appendChild(legendRow("#2f7a46", "Lactating", cats.lactating));
+    legend.appendChild(legendRow("#d9a441", "Calves", cats.calves));
+    legend.appendChild(legendRow("#e58f8f", "Pregnant", cats.pregnant));
+    legend.appendChild(legendRow("#b9c4bb", "Dry", cats.dry));
+    donutWrap.appendChild(legend);
+    herdCard.appendChild(donutWrap);
+    row2.appendChild(herdCard);
+
+    // --- Quick Add + Weather column
+    const rightCol = el("div", { style: "display:flex;flex-direction:column;gap:14px" });
+    const qaCard = el("div", { class: "card" });
+    qaCard.appendChild(cardHead("health", "Quick Add"));
+    const qaGrid = el("div", { class: "quick-add", style: "padding:0 16px 16px" });
+    const qaTile = (label, icon, tone, onclick) => el("div", { class: "quick-add__tile", style: tint(tone), onclick }, [
+      el("span", { html: JF.Utils.svgIcon(icon, 20, 20) }), label,
+    ]);
+    qaGrid.appendChild(qaTile("Add Animal", "animals", "green", () => JF.QuickEntry?.openPicker()));
+    qaGrid.appendChild(qaTile("Heat/AI", "fire", "pink", () => JF.QuickEntry?.openPicker()));
+    qaGrid.appendChild(qaTile("Health Entry", "health", "blue", () => JF.QuickEntry?.openPicker()));
+    qaGrid.appendChild(qaTile("Finance Entry", "finance", "gold", () => JF.QuickEntry?.openPicker()));
+    qaGrid.appendChild(qaTile("Journal Entry", "docs", "purple", () => JF.App.navigate("#finance/journal")));
+    qaGrid.appendChild(qaTile("Upload Photo", "photo", "green", () => JF.App.navigate("#documents")));
+    qaCard.appendChild(qaGrid);
+    rightCol.appendChild(qaCard);
+
+    // Weather card (static info card — no external service)
+    const weather = el("div", { class: "card", style: "padding:14px 16px" }, [
+      el("div", { style: "display:flex;align-items:center;gap:8px;font-weight:700" }, [
+        el("span", { html: JF.Utils.svgIcon("dashboard", 16, 16), style: "color:var(--color-wheat-700)" }),
+        "Weather & Farm Conditions",
+      ]),
+      el("div", { style: "display:flex;gap:18px;margin-top:10px;align-items:center" }, [
+        el("div", {}, [
+          el("div", { style: "font-family:var(--font-display);font-size:var(--fs-2xl);font-weight:700" }, "27°C"),
+          el("div", { class: "table__cell--muted", style: "font-size:var(--fs-caption)" }, "Partly sunny"),
+        ]),
+        el("div", { style: "border-left:1px solid var(--color-ink-100);padding-left:18px" }, [
+          el("div", { style: "font-weight:700" }, "62%"),
+          el("div", { class: "table__cell--muted", style: "font-size:var(--fs-caption)" }, "Humidity"),
+        ]),
+        el("div", {}, [
+          el("div", { style: "font-weight:700" }, "8 km/h"),
+          el("div", { class: "table__cell--muted", style: "font-size:var(--fs-caption)" }, "Wind"),
+        ]),
       ]),
     ]);
-    finGrid.appendChild(amtCard("💸 TODAY", "Today's Expenses", fin.todayTotal, `${todayNice}`));
-    finGrid.appendChild(amtCard("📊 THIS MONTH", "Monthly Expenses", fin.monthTotal, JF.Utils.formatDate(monthStart, "MMM yyyy")));
+    rightCol.appendChild(weather);
+    row2.appendChild(rightCol);
+    page.appendChild(row2);
 
-    // Journal entries mini-list
-    const recentJournalCard = JF.Utils.el("div", { class: "card" });
-    recentJournalCard.appendChild(JF.Utils.el("div", { class: "card__header" }, [
-      JF.Utils.el("div", {}, [
-        JF.Utils.el("div", { class: "card__eyebrow" }, "📒 ENTRIES"),
-        JF.Utils.el("h3", { class: "section__title", style: { margin: 0 } }, "Recent Journal"),
-      ]),
-      JF.Utils.el("button", { class: "btn btn--ghost btn--sm", onclick: () => JF.App.navigate("#finance/journal") }, "View all"),
+    /* ===== FOOTER tagline + hills ===== */
+    page.appendChild(el("div", { class: "dash-footer" }, [
+      el("div", { class: "dash-footer__tagline" }, "Better Cattle  Brighter Futures"),
+      el("div", { class: "dash-footer__hills" }),
     ]));
-    const rjBody = JF.Utils.el("div", {});
-    if (fin.recent.length) {
-      fin.recent.forEach((j) => {
-        rjBody.appendChild(JF.Utils.el("div", { style: "display:grid;grid-template-columns:auto 1fr auto;gap:var(--space-3);align-items:baseline;padding:var(--space-3) 0;border-bottom:1px dashed var(--color-ink-100)" }, [
-          JF.Utils.el("span", { class: "eyebrow" }, JF.Utils.formatDate(j.Date, "dd MMM")),
-          JF.Utils.el("div", {}, [
-            JF.Utils.el("div", { style: "font-weight:600;color:var(--color-ink-900);font-size:var(--fs-sm)" }, j.Description || j.TransactionType || "Entry"),
-            JF.Utils.el("div", { class: "table__cell--muted", style: "font-size:var(--fs-sm)" }, `${j.DebitAccount || ""} ↔ ${j.CreditAccount || ""}`),
-          ]),
-          JF.Utils.el("span", { style: "font-weight:600;color:var(--color-oxblood-700);font-variant-numeric:tabular-nums" }, JF.Utils.money(j.Amount || 0)),
-        ]));
-      });
-    } else {
-      rjBody.appendChild(JF.Utils.el("div", { class: "search-empty" }, "No journal entries yet."));
-    }
-    recentJournalCard.appendChild(rjBody);
-    finGrid.appendChild(recentJournalCard);
   };
 
   return { render };
