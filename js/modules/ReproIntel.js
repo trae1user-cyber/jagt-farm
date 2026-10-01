@@ -312,9 +312,13 @@ JF.ReproIntel = (function () {
     if (["Sold", "Deceased"].includes(status)) return { ...TRAFFIC.green, hidden: true };
     if (status === "Pregnant") return { ...TRAFFIC.blue, next: "Calving monitoring" };
 
+    // One unreadable entity must not break the Animals table: degrade to an
+    // empty list (the traffic light just shows fewer signals) instead of
+    // throwing. 404/400s from an older server version land here too.
+    const safeList = async (call) => { try { return await call; } catch (e) { return []; } };
     const [heats, insem, preg, healths, calvings] = await Promise.all([
-      JF.Store.heat.list(), JF.Store.insemination.list(), JF.Store.pregnancy.list(),
-      JF.Store.health.list(), JF.Store.calving.list(),
+      safeList(JF.Store.heat.list()), safeList(JF.Store.insemination.list()), safeList(JF.Store.pregnancy.list()),
+      safeList(JF.Store.health.list()), safeList(JF.Store.calving.list()),
     ]);
     const today = JF.Utils.todayISO();
     const since = (iso) => JF.Utils.daysBetween(iso, today);

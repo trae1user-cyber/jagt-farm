@@ -26,6 +26,11 @@ JF.Data.MongoApiAdapter = (function () {
   const { Interface } = JF.Data.DataAdapter;
   console.info("[JF] MongoApiAdapter v4 — bootstrap batching + entity cache active");
 
+  // Entities that an older server deployment (API v1.0.x) does not recognise.
+  // While the capability probe reports an old server, these are served as
+  // empty lists WITHOUT a request — no 400s in the console, no lag.
+  const NEWER_ENTITIES = new Set(["insemination", "dryOff", "death", "groups"]);
+
   // Farm API defaults baked into the code, so every device connects with zero
   // setup. Settings can still override them (localStorage wins when present).
   const DEFAULT_ENDPOINT = "https://jagt-farm-api.onrender.com";
@@ -56,6 +61,7 @@ JF.Data.MongoApiAdapter = (function () {
       // per entity keeps the app usable when the API is unreachable.
       this._cache = new Map(); // entity -> { at, rows }
       this._cacheTTL = 30000; // 30s of instant navigation
+      this._serverCapabilities = null; // set by warmup()'s version probe
     }
 
     _cacheGet(entity) {
@@ -81,7 +87,22 @@ JF.Data.MongoApiAdapter = (function () {
      */
     async warmup() {
       try {
-        const data = await this._call("bootstrap", {});
+        // Version gate: ask GET / (always 200, never a console error) whether
+        // this deployment knows the bootstrap action (1.1.0+). On an older
+        // server we skip straight to the ping fallback — no 400 in the console.
+        let supportsBootstrap = true;
+        try {
+          const res = await fetch(this.endpoint, { method: "GET" });
+          const info = await res.json();
+          const v = String(info?.data?.version || "1.0.0");
+          supportsBootstrap = v.split(".").map(Number)[1] >= 1 || Number(v.split(".")[0]) > 1;
+        } catch (e) { /* opaque — optimistically try bootstrap anyway */ }
+        this._serverCapabilities = { bootstrap: supportsBootstrap };
+        if (!supportsBootstrap) {
+          await this._call("ping", {}, { quiet: true });
+          return {};
+        }
+        const data = await this._call("bootstrap", {}, { quiet: true });
         if (data && typeof data === "object") {
           Object.entries(data).forEach(([entity, rows]) => {
             if (Array.isArray(rows)) { this._cacheSet(entity, rows); this._snapshot(entity, rows); }
@@ -92,7 +113,7 @@ JF.Data.MongoApiAdapter = (function () {
       } catch (e) {
         // Old server without the bootstrap action? A successful ping still
         // proves the API is alive (return {} so the caller stays in mongo mode).
-        try { await this._call("ping"); return {}; } catch (e2) { return null; }
+        try { await this._call("ping", {}, { quiet: true }); return {}; } catch (e2) { return null; }
       }
     }
 
@@ -106,6 +127,7 @@ JF.Data.MongoApiAdapter = (function () {
       }
       if (token !== undefined) { this.token = token; try { localStorage.setItem("jf_api_token", token); } catch (e) {} }
       this.isPlaceholder = !this._isRealEndpoint();
+      this._serverCapabilities = null; // re-probe the (possibly new) server on next warmup
     }
 
     _isRealEndpoint() {
@@ -113,9 +135,9 @@ JF.Data.MongoApiAdapter = (function () {
       return !!ep && !/YOUR_API_URL|localhost-placeholder/i.test(ep);
     }
 
-    async _call(action, payload = {}) {
+    async _call(action, payload = {}, { quiet = false } = {}) {
       if (!this._isRealEndpoint()) {
-        console.warn(`[MongoApi] Offline stub mode (${action}) - configure the farm API URL in Settings to go live.`);
+        if (!quiet) console.warn(`[MongoApi] Offline stub mode (${action}) - configure the farm API URL in Settings to go live.`);
         return this._fallback(action, payload);
       }
       try {
@@ -134,7 +156,14 @@ JF.Data.MongoApiAdapter = (function () {
         if (!json.success) throw new Error(json.error || "Farm API call failed");
         return json.data;
       } catch (err) {
-        console.error(`[MongoApi:${action}]`, err);
+        // Known, handled degradations (old server missing a newer entity/action)
+        // get ONE short line — the call sites already cope, so a full stack
+        // trace would be noise, not signal.
+        if (/Unknown (entity|action)/i.test(String(err.message))) {
+          console.warn(`[MongoApi:${action}] ${err.message} (older server deploy — the site degrades gracefully; redeploying the API removes this).`);
+        } else if (!quiet) {
+          console.error(`[MongoApi:${action}]`, err);
+        }
         throw err;
       }
     }
@@ -171,6 +200,11 @@ JF.Data.MongoApiAdapter = (function () {
     emit(evt, p) { (this.listeners.get(evt) || []).forEach((fn) => fn(p)); }
 
     async list(entity) {
+      // Old server deployment: entities it does not know are served as empty
+      // straight away — no request, no 400, no console noise. The capability
+      // flag refreshes on every boot (warmup), so redeploying the API simply
+      // turns this branch off.
+      if (this._serverCapabilities && !this._serverCapabilities.bootstrap && NEWER_ENTITIES.has(entity)) return [];
       const hit = this._cacheGet(entity);
       if (hit) return hit;
       try {
@@ -186,6 +220,13 @@ JF.Data.MongoApiAdapter = (function () {
         if (snap && snap.length) {
           console.warn(`[MongoApi:list] ${entity} unreachable — showing last-known snapshot (${snap.length} rows).`);
           return snap;
+        }
+        // "Unknown entity" = the server is older than the site code (needs a
+        // Render redeploy). Log ONE short line instead of a full error stack —
+        // the app already degrades gracefully on every call site.
+        if (/Unknown entity/i.test(String(err.message))) {
+          console.warn(`[MongoApi] server does not know "${entity}" yet (older deploy) — treating as empty.`);
+          return [];
         }
         throw err;
       }

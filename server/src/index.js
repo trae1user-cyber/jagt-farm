@@ -270,8 +270,10 @@ async function main() {
   });
 
   // Friendly GET so the URL can be checked in a browser (like the old doGet ping).
+  // The version lets a fresh client know "bootstrap" exists (1.1.0+) so it
+  // never wastes a request — and never logs a 400 — on an older deployment.
   app.get("/", (_req, res) => {
-    res.json({ success: true, data: { status: "online", backend: "MongoDB", database: db ? db.databaseName : DB_NAME, version: "1.0.0" } });
+    res.json({ success: true, data: { status: "online", backend: "MongoDB", database: db ? db.databaseName : DB_NAME, version: "1.1.0" } });
   });
 
   // Serve a GridFS file by id (used by photo <img> tags saved on any device).

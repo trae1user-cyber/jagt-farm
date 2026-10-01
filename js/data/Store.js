@@ -57,7 +57,11 @@ JF.Store = (function () {
   const markBridged = () => { bridged = true; };
 
   const getAdapter = () => adapter;
-  const setBackend = (type) => init(type); // rebuilds the adapter
+  const setBackend = (type) => {
+    try { localStorage.setItem("jf_backend_user", "1"); } catch (e) {} // pins the user's choice against self-heal
+    try { localStorage.setItem("jf_backend", type); } catch (e) {}
+    return init(type); // rebuilds the adapter
+  };
   /** Kept for compatibility - the Google Sheet rulebook layer is removed. */
   const configureRuleSheet = () => {};
   const getRuleSheetAdapter = () => null;
@@ -171,17 +175,28 @@ JF.Store = (function () {
   // Auto-initialize from localStorage preference. Default is the MongoDB farm
   // API (endpoint+token are baked into MongoApiAdapter), falling back to the
   // device store only when the API is unreachable - checked asynchronously.
+  //
+  // SELF-HEALING: a "mock" preference that was written automatically (no user
+  // choice recorded) is retried against MongoDB on every boot — a Render cold
+  // start once sent a device to mock mode and it must come back on its own.
   const savedBackend = localStorage.getItem("jf_backend");
-  if (savedBackend) {
+  const userChoseBackend = localStorage.getItem("jf_backend_user") === "1";
+  if (savedBackend && userChoseBackend) {
     init(savedBackend);
+    if (savedBackend === "mongo") dataAdapter.warmup?.();
   } else {
+    // Auto path: always try MongoDB first, drop to device only while offline.
     init("mongo");
     // One-shot boot fetch: warms the entity cache AND checks reachability in
     // the same round trip (the old boot fired an expensive ping that counted
     // every collection). If the baked-in API cannot be reached at all, drop
-    // to the offline device store.
+    // to the offline device store — without recording it as a user choice,
+    // so the next boot tries MongoDB again.
     Promise.resolve(dataAdapter.warmup?.()).then((data) => {
-      if (!data && !localStorage.getItem("jf_backend")) init("mock");
+      if (!data && !localStorage.getItem("jf_backend_user")) {
+        init("mock");
+        try { localStorage.setItem("jf_backend", "mock"); } catch (e) {}
+      }
     }).catch(() => {});
   }
 
