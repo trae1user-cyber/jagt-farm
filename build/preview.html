@@ -3076,8 +3076,12 @@ JF.Data.MongoApiAdapter = (function () {
   class MongoApiAdapter extends Interface {
     constructor() {
       super();
+      // Only trust a stored endpoint that is a bare origin (https://host or
+      // https://host/). Anything with a path tail means someone pasted the URL
+      // and token into one field - ignore it and use the baked-in default.
       const stored = (() => { try { return localStorage.getItem("jf_api_endpoint"); } catch (e) { return null; } })();
-      this.endpoint = stored || DEFAULT_ENDPOINT;
+      const clean = String(stored || "").trim();
+      this.endpoint = /^https?:\/\/[^/]+\/?$/.test(clean) ? clean : DEFAULT_ENDPOINT;
       const storedTok = (() => { try { return localStorage.getItem("jf_api_token"); } catch (e) { return null; } })();
       this.token = storedTok != null ? storedTok : DEFAULT_TOKEN;
       this.listeners = new Map();
