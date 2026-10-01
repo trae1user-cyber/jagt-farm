@@ -207,31 +207,9 @@ JF.App = (function () {
     try { JF.CareSchedule.init(); } catch (e) { console.warn("CareSchedule init failed:", e); }
     try { JF.LifeCycle.init(); } catch (e) { console.warn("LifeCycle init failed:", e); }
 
-    // Database-driven rule engine: loads Rules / Rule_Parameters / Rule_Overrides and
-    // recomputes every reminder from the real entries. It supersedes the fixed
-    // care plan above, so from here on the stored Rulebook drives behaviour.
-    try {
-      const stats = await JF.RuleEngine.init();
-      console.info(`[JF] Rule engine armed: ${stats.total} rules (${stats.active} active) from ${stats.source}.`);
-      // Re-evaluate only the animals touched by a new ENTRY, so saving stays fast.
-      // Reminders/rules/audit are excluded: reacting to those would make the engine
-      // re-enter itself while it is writing its own output.
-      const ENTRY_ENTITIES = new Set(["animals", "heat", "insemination", "pregnancy", "calving",
-        "health", "deworming", "vaccination", "dryOff", "death", "purchases", "sales"]);
-      JF.Store.on("change", ({ entity, action, record }) => {
-        if (action !== "create" || !record || !ENTRY_ENTITIES.has(entity)) return;
-        const id = record.AnimalID || (entity === "animals" ? record.id : null);
-        if (id) JF.RuleEngine.evaluateAnimal(id).catch(() => {});
-      });
-      // Persistence: when the tab is refocused, re-read the rule configuration from
-      // the store (MongoDB when the farm API is connected) so edits made elsewhere
-      // or on another device are picked up without a manual reload. Edits made here
-      // are already written through to the database as they happen, so nothing needs
-      // flushing on hide.
-      document.addEventListener("visibilitychange", () => {
-        if (document.visibilityState === "visible") JF.RuleEngine.focus().catch(() => {});
-      });
-    } catch (e) { console.warn("RuleEngine init failed:", e); }
+    // Router registration (the first render happens further down, after the
+    // sidebar is built — it must exist before the view paints).
+    window.addEventListener("hashchange", onHashChange);
 
     // CRITICAL: bridge adapter data-change events into the CascadeEngine pub/sub so
     // the reminder/accounting/status subscribers actually fire. The engine must only
@@ -246,6 +224,36 @@ JF.App = (function () {
       }
     } catch (e) { console.warn("Cascade bridge failed:", e); }
 
+    // Database-driven rule engine: loads Rules / Rule_Parameters / Rule_Overrides and
+    // recomputes every reminder from the real entries. It supersedes the fixed
+    // care plan above, so from here on the stored Rulebook drives behaviour.
+    // Runs in the BACKGROUND: boot no longer waits for it.
+    (async () => {
+      try {
+        const stats = await JF.RuleEngine.init();
+        console.info(`[JF] Rule engine armed: ${stats.total} rules (${stats.active} active) from ${stats.source}.`);
+        updateBadgeCounts();
+        // Re-evaluate only the animals touched by a new ENTRY, so saving stays fast.
+        // Reminders/rules/audit are excluded: reacting to those would make the engine
+        // re-enter itself while it is writing its own output.
+        const ENTRY_ENTITIES = new Set(["animals", "heat", "insemination", "pregnancy", "calving",
+          "health", "deworming", "vaccination", "dryOff", "death", "purchases", "sales"]);
+        JF.Store.on("change", ({ entity, action, record }) => {
+          if (action !== "create" || !record || !ENTRY_ENTITIES.has(entity)) return;
+          const id = record.AnimalID || (entity === "animals" ? record.id : null);
+          if (id) JF.RuleEngine.evaluateAnimal(id).catch(() => {});
+        });
+        // Persistence: when the tab is refocused, re-read the rule configuration from
+        // the store (MongoDB when the farm API is connected) so edits made elsewhere
+        // or on another device are picked up without a manual reload. Edits made here
+        // are already written through to the database as they happen, so nothing needs
+        // flushing on hide.
+        document.addEventListener("visibilitychange", () => {
+          if (document.visibilityState === "visible") JF.RuleEngine.focus().catch(() => {});
+        });
+      } catch (e) { console.warn("RuleEngine init failed:", e); }
+    })();
+
     // Wire UI helpers
     sidebarNav();
     initSidebarToggle();
@@ -256,6 +264,12 @@ JF.App = (function () {
       if (fab) fab.addEventListener("click", () => JF.QuickEntry.openPicker());
     } catch (e) {}
 
+    // First render NOW: the shell (sidebar + topbar) exists, so the dashboard
+    // paints immediately from the adapter's warm cache while the rule engine
+    // (dozens of round trips on a cold Render instance) runs in the background.
+    if (!location.hash) location.hash = "#dashboard";
+    route();
+
     // Listen to data changes to update badge counts
     try {
       JF.Store.on("change", () => updateBadgeCounts());
@@ -264,37 +278,34 @@ JF.App = (function () {
 
     // First boot against an empty MongoDB: seed one dummy animal + heat entry so
     // the database, API round trip and rule engine are proven end to end. Runs
-    // only when the farm has no animals at all, and never again after that.
-    try {
-      const animals = await JF.Store.animals.list();
-      if (!animals.length) {
-        const dummy = await JF.Store.animals.create({
-          AnimalID: "COW-0001",
-          Name: "Lakshmi",
-          Gender: "Female",
-          Category: "Cow",
-          Breed: "HF Cross",
-          DateOfBirth: "2022-03-10",
-          CurrentStatus: "Lactating",
-          Notes: "First entry — connection test (safe to edit or delete).",
-        });
-        await JF.Store.heat.create({
-          HeatID: "HT-0001",
-          AnimalID: dummy.AnimalID || dummy.id,
-          HeatDate: JF.Utils.todayISO(),
-          ObservationMethod: "Visual",
-          Notes: "Seeded heat entry for the connection test.",
-        });
-        console.info("[JF] MongoDB was empty — seeded dummy animal COW-0001 + heat entry.");
-      }
-    } catch (e) { console.warn("Dummy seed skipped:", e?.message || e); }
-
-    // Router
-    window.addEventListener("hashchange", onHashChange);
-    if (!location.hash) location.hash = "#dashboard";
-    await route();
-
-    await updateBadgeCounts();
+    // only when the farm has no animals at all, in the background so a slow
+    // first connection never blocks the dashboard.
+    (async () => {
+      try {
+        const animals = await JF.Store.animals.list();
+        if (!animals.length) {
+          const dummy = await JF.Store.animals.create({
+            AnimalID: "COW-0001",
+            Name: "Lakshmi",
+            Gender: "Female",
+            Category: "Cow",
+            Breed: "HF Cross",
+            DateOfBirth: "2022-03-10",
+            CurrentStatus: "Lactating",
+            Notes: "First entry — connection test (safe to edit or delete).",
+          });
+          await JF.Store.heat.create({
+            HeatID: "HT-0001",
+            AnimalID: dummy.AnimalID || dummy.id,
+            HeatDate: JF.Utils.todayISO(),
+            ObservationMethod: "Visual",
+            Notes: "Seeded heat entry for the connection test.",
+          });
+          console.info("[JF] MongoDB was empty — seeded dummy animal COW-0001 + heat entry.");
+          route(); // re-render with the seeded animal visible
+        }
+      } catch (e) { console.warn("Dummy seed skipped:", e?.message || e); }
+    })();
 
     // Wire quick-entry button fallback if not already
     console.info("%c🐄 Jagt Farm — Cattle Management System",
@@ -303,6 +314,16 @@ JF.App = (function () {
       : (localStorage.getItem("jf_backend") || "mock");
     console.info(`%cBackend: ${_backend === "mock" ? "local device (mock) - MongoDB API planned" : "MongoDB farm API (" + (JF.Store.getAdapter()?.endpoint || "") + ")"} · Mode: ${_backend === "mock" ? "development - mock data" : "connected"}`,
       "color:#45504a;");
+
+    // Keep-alive: Render's free tier sleeps the API after ~15 idle minutes and
+    // the next visit then waits 30-60 s. While the site is open, a tiny ping
+    // every 10 minutes keeps the instance warm. (Tab throttling may delay this
+    // in background tabs - that is fine; the first visit of the day still pays
+    // the cold start.)
+    const ad = JF.Store.getAdapter();
+    if (ad && typeof ad.warmup === "function" && _backend !== "mock") {
+      setInterval(() => { ad.warmup(); }, 10 * 60 * 1000); // also refreshes the entity cache
+    }
   };
 
   if (document.readyState === "loading") {

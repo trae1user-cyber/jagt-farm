@@ -9,6 +9,10 @@
 
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <!-- Warm the farm API connection (DNS+TCP+TLS) while the page parses: on a
+       cold Render instance this saves a full TLS handshake off the first call. -->
+  <link rel="preconnect" href="https://jagt-farm-api.onrender.com" crossorigin />
+  <link rel="preload" as="image" href="assets/hero-farm.jpg" fetchpriority="high" />
   <link
     href="https://fonts.googleapis.com/css2?family=Bitter:wght@400;600;700;800&family=Playfair+Display:wght@600;700;800&family=Dancing+Script:wght@500;600;700&display=swap"
     rel="stylesheet"
@@ -88,43 +92,42 @@
     <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
   </button>
 
-  <script src="js/modules/Utils.js"></script>
-  <script src="js/modules/FinanceCalc.js"></script>
-  <script src="js/modules/CareSchedule.js"></script>
-  <script src="js/modules/LifeCycle.js"></script>
-  <script src="js/modules/RuleBook.js"></script>
-  <script src="js/modules/PhotoUpload.js"></script>
-  <script src="js/data/DataAdapter.js"></script>
-  <script src="js/data/MockAdapter.js"></script>
-  <script src="js/data/MongoApiAdapter.js"></script>
-  <script src="js/data/SheetRulesAdapter.js"></script>
-  <script src="js/data/Store.js"></script>
-  <script src="js/data/seed.js"></script>
-  <script src="js/modules/CascadeEngine.js"></script>
-  <script src="js/modules/RuleEngine.js"></script>
-  <script src="js/modules/ReproIntel.js"></script>
-  <script src="js/modules/TimelineService.js"></script>
-  <script src="js/modules/Modal.js"></script>
-  <script src="js/modules/Toast.js"></script>
-  <script src="js/modules/Search.js"></script>
-  <script src="js/modules/QuickEntry.js"></script>
+  <script defer src="js/modules/Utils.js"></script>
+  <script defer src="js/modules/FinanceCalc.js"></script>
+  <script defer src="js/modules/CareSchedule.js"></script>
+  <script defer src="js/modules/LifeCycle.js"></script>
+  <script defer src="js/modules/RuleBook.js"></script>
+  <script defer src="js/modules/PhotoUpload.js"></script>
+  <script defer src="js/data/DataAdapter.js"></script>
+  <script defer src="js/data/MockAdapter.js"></script>
+  <script defer src="js/data/MongoApiAdapter.js"></script>
+  <script defer src="js/data/Store.js"></script>
+  <script defer src="js/data/seed.js"></script>
+  <script defer src="js/modules/CascadeEngine.js"></script>
+  <script defer src="js/modules/RuleEngine.js"></script>
+  <script defer src="js/modules/ReproIntel.js"></script>
+  <script defer src="js/modules/TimelineService.js"></script>
+  <script defer src="js/modules/Modal.js"></script>
+  <script defer src="js/modules/Toast.js"></script>
+  <script defer src="js/modules/Search.js"></script>
+  <script defer src="js/modules/QuickEntry.js"></script>
 
-  <script src="js/views/DashboardView.js"></script>
-  <script src="js/views/AnimalsView.js"></script>
-  <script src="js/views/AnimalProfileView.js"></script>
-  <script src="js/views/ReproductionView.js"></script>
-  <script src="js/views/HeatDetectiveView.js"></script>
-  <script src="js/views/HealthView.js"></script>
-  <script src="js/views/CalvesView.js"></script>
-  <script src="js/views/FinanceView.js"></script>
-  <script src="js/views/DocumentsView.js"></script>
-  <script src="js/views/CalendarView.js"></script>
-  <script src="js/views/RemindersView.js"></script>
-  <script src="js/views/ReportsView.js"></script>
-  <script src="js/views/AnalyticsView.js"></script>
-  <script src="js/views/SettingsView.js"></script>
-  <script src="js/views/RulesView.js"></script>
+  <script defer src="js/views/DashboardView.js"></script>
+  <script defer src="js/views/AnimalsView.js"></script>
+  <script defer src="js/views/AnimalProfileView.js"></script>
+  <script defer src="js/views/ReproductionView.js"></script>
+  <script defer src="js/views/HeatDetectiveView.js"></script>
+  <script defer src="js/views/HealthView.js"></script>
+  <script defer src="js/views/CalvesView.js"></script>
+  <script defer src="js/views/FinanceView.js"></script>
+  <script defer src="js/views/DocumentsView.js"></script>
+  <script defer src="js/views/CalendarView.js"></script>
+  <script defer src="js/views/RemindersView.js"></script>
+  <script defer src="js/views/ReportsView.js"></script>
+  <script defer src="js/views/AnalyticsView.js"></script>
+  <script defer src="js/views/SettingsView.js"></script>
+  <script defer src="js/views/RulesView.js"></script>
 
-  <script src="js/app.js"></script>
+  <script defer src="js/app.js"></script>
 </body>
 </html>

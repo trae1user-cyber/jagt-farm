@@ -200,84 +200,6 @@ JF.Views.Settings = (function () {
       }
     }, "🩺 Verify MongoDB API");
 
-    // ---- Rulebook Google Sheet (the hybrid: rules live in Sheets, data in Mongo) ----
-    const sheetInput = JF.Utils.el("input", {
-      class: "input",
-      id: "cfg-rules-endpoint",
-      type: "url",
-      placeholder: "https://script.google.com/macros/s/.../exec",
-      value: JF.Store.getConfig("rules_endpoint") || ""
-    });
-    const sheetStatus = JF.Utils.el("div", { id: "rules-sheet-status", style: "margin-top:8px;font-size:var(--fs-sm);color:var(--color-ink-500)" });
-    const sheetTestBtn = JF.Utils.el("button", {
-      class: "btn btn--ghost btn--sm",
-      type: "button",
-      onclick: async () => {
-        sheetStatus.textContent = "⏳ Testing the rulebook sheet...";
-        sheetStatus.style.color = "var(--color-ink-500)";
-        const url = sheetInput.value.trim();
-        if (!url) {
-          sheetStatus.textContent = "❌ Paste the /exec URL of the Apps Script Web app first (see RULEBOOK-SHEET-SETUP.md).";
-          sheetStatus.style.color = "var(--color-oxblood-700)";
-          return;
-        }
-        try {
-          const ad = new JF.Data.SheetRulesAdapter(null);
-          ad.configure({ endpoint: url, token: JF.Store.getConfig("rules_token") || "" });
-          const ping = await ad.testConnection();
-          sheetStatus.textContent = `✅ Sheet connected: "${ping?.document || "rulebook"}" - Rules ${ping?.rules ?? "?"} rows, Parameters ${ping?.ruleParameters ?? "?"}, Overrides ${ping?.ruleOverrides ?? "?"}.`;
-          sheetStatus.style.color = "var(--color-success-700)";
-          JF.Toast?.show("Rulebook sheet connected!", "success");
-        } catch (err) {
-          sheetStatus.textContent = `❌ Sheet connection failed: ${err.message}`;
-          sheetStatus.style.whiteSpace = "pre-line";
-          sheetStatus.style.color = "var(--color-oxblood-700)";
-        }
-      }
-    }, "⚡ Test Sheet");
-    const sheetVerifyBtn = JF.Utils.el("button", {
-      class: "btn btn--primary btn--sm",
-      type: "button",
-      onclick: async () => {
-        const url = sheetInput.value.trim();
-        if (!url) { JF.Toast?.show("Paste the rulebook sheet URL first.", "danger"); return; }
-        sheetStatus.textContent = "⏳ Writing/reading a probe row inside the sheet...";
-        sheetStatus.style.color = "var(--color-ink-500)";
-        try {
-          const ad = new JF.Data.SheetRulesAdapter(null);
-          ad.configure({ endpoint: url, token: JF.Store.getConfig("rules_token") || "" });
-          const r = await ad.verify();
-          sheetStatus.textContent = `${r.ok ? "✅" : "⚠️"} ${r.message || "verified"} (document: ${r.document || "?"})`;
-          sheetStatus.style.color = r.ok ? "var(--color-success-700)" : "var(--color-oxblood-700)";
-          JF.Toast?.show(r.ok ? "Rulebook sheet verified." : "Sheet verification found problems.", r.ok ? "success" : "warning");
-        } catch (err) {
-          sheetStatus.textContent = `❌ Verification failed: ${err.message}`;
-          sheetStatus.style.color = "var(--color-oxblood-700)";
-        }
-      }
-    }, "🩺 Verify Sheet");
-    const sheetInstallBtn = JF.Utils.el("button", {
-      class: "btn btn--accent btn--sm",
-      type: "button",
-      onclick: async () => {
-        const url = sheetInput.value.trim();
-        if (!url) { JF.Toast?.show("Paste the rulebook sheet URL first.", "danger"); return; }
-        if (!confirm("Install the built-in rulebook (85 rules + parameters) into the sheet's three tabs?\n\nExisting rows are kept; only missing ones are added.")) return;
-        sheetStatus.textContent = "⏳ Writing the rulebook into the sheet tabs...";
-        try {
-          const ad = new JF.Data.SheetRulesAdapter(null);
-          ad.configure({ endpoint: url, token: JF.Store.getConfig("rules_token") || "" });
-          const res = await ad.seedRules();
-          sheetStatus.textContent = `✅ Installed: ${res?.rules?.added || 0} new rule row(s), ${res?.parameters?.added || 0} parameter row(s). Open the spreadsheet to see the tabs.`;
-          sheetStatus.style.color = "var(--color-success-700)";
-          JF.Toast?.show("Rulebook written to the sheet.", "success");
-        } catch (err) {
-          sheetStatus.textContent = `❌ Install failed: ${err.message}`;
-          sheetStatus.style.color = "var(--color-oxblood-700)";
-        }
-      }
-    }, "📥 Install rulebook into sheet");
-
     const demoBtn = JF.Utils.el("button", {
       class: "btn btn--ghost btn--sm",
       type: "button",
@@ -319,21 +241,7 @@ JF.Views.Settings = (function () {
         JF.Utils.el("div", { class: "field__hint", style: "margin-top:10px" },
           "🔒 Data safety: there is no one-click erase in the app by design - your records belong in MongoDB (Atlas keeps continuous backups). Load Demo Farm replaces this device's data with the sample farm (it asks first)."),
         JF.Utils.el("div", { class: "field__hint", style: "margin-top:10px;color:var(--color-success-700)" },
-          "💡 HYBRID SPLIT: farm data (animals, milk, expenses, photos) lives in MongoDB, while your RULES live in a Google Sheet you can edit like a spreadsheet. Set the sheet up once (RULEBOOK-SHEET-SETUP.md) and paste its URL below — every rule toggle, parameter and vet override then reads/writes the Sheet's Rules / Rule_Parameters / Rule_Overrides tabs. Until then rules live with the database/device and nothing changes."),
-      fieldGroup("📑 RULEBOOK GOOGLE SHEET (RULE/ADMIN CONSOLE)", "Edit Rules Like a Spreadsheet", [
-        JF.Utils.el("div", { class: "field" }, [
-          JF.Utils.el("label", { class: "field__label" }, "Rulebook Google Sheet URL (Apps Script /exec)"),
-          sheetInput,
-          JF.Utils.el("div", { class: "field__hint" },
-            "One-time setup: create a Google Spreadsheet → Extensions → Apps Script → paste google-apps-script/Code.gs → Deploy as Web app (Execute as: Me, Access: Anyone). Paste the /exec URL here. The three tabs become the live rulebook: edit a value in the Sheet, the app picks it up; change something in the app, the Sheet updates."),
-          sheetStatus,
-        ]),
-        JF.Utils.el("div", { style: "display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;" }, [
-          sheetTestBtn,
-          sheetVerifyBtn,
-          sheetInstallBtn,
-        ]),
-      ])
+          "💡 EVERYTHING LIVES IN MONGODB: farm data (animals, milk, expenses, photos) and the rulebook (Rules, Rule_Parameters, Rule_Overrides) are all stored in your MongoDB database. Edit rules on the Rules screen - changes save straight to the database and apply on every device."),
       ]),
       fieldGroup("🏠 FARM INFORMATION", "Farm & System Defaults", [
         JF.Utils.el("div", { class: "grid grid--cols-2" }, [
@@ -498,14 +406,6 @@ JF.Views.Settings = (function () {
         if (v !== undefined && v !== null) {
           await JF.Store.settings.set(k, v);
         }
-      }
-
-      // The rulebook sheet URL lives in localStorage like the other endpoints,
-      // so the SheetRulesAdapter picks it up on its next call.
-      const sheetUrl = document.getElementById("cfg-rules-endpoint")?.value?.trim();
-      if (sheetUrl !== null && sheetUrl !== undefined) {
-        JF.Store.setConfig("rules_endpoint", sheetUrl);
-        JF.Store.configureRuleSheet({ endpoint: sheetUrl, token: JF.Store.getConfig("rules_token") || "" });
       }
 
       JF.Toast?.show("Settings saved successfully!", "success");

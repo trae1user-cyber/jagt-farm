@@ -72,8 +72,12 @@ JF.RuleEngine = (function () {
     };
     let sheetRules = 0, sheetParams = 0, autoInstalled = 0;
     try {
+      // Each rule entity degrades independently: a 400 on one collection
+      // (old server version, entity not deployed yet) must not fall back to
+      // the built-in book and wipe the farm's own rule edits from view.
+      const safeList = async (call) => { try { return await call; } catch (e) { console.warn("[RuleEngine] rule row list unavailable:", e.message); return []; } };
       const [rRows, pRows, oRows] = await Promise.all([
-        JF.Store.rules.list(), JF.Store.ruleParameters.list(), JF.Store.ruleOverrides.list(),
+        safeList(JF.Store.rules.list()), safeList(JF.Store.ruleParameters.list()), safeList(JF.Store.ruleOverrides.list()),
       ]);
       // First connection: the rulebook home exists but is empty. Install the
       // built-in rulebook once, so the home (sheet tabs or database collections)
@@ -207,7 +211,15 @@ JF.RuleEngine = (function () {
   const latest = (list, key) => list.filter((x) => x[key]).sort((x, y) => String(y[key]).localeCompare(String(x[key])))[0] || null;
 
   const buildContext = async (animal, cache) => {
-    const load = async (store) => (cache[store] ? cache[store] : (cache[store] = await JF.Store[store].list()));
+    // One unreadable entity must not abort the whole sweep (e.g. an old server
+    // version that does not know a newer entity yet): missing data degrades to
+    // "no entries of that kind" instead of killing reminder generation.
+    const load = async (store) => {
+      if (cache[store]) return cache[store];
+      try { cache[store] = await JF.Store[store].list(); }
+      catch (e) { console.warn(`[RuleEngine] ${store} unavailable — evaluating without it.`, e.message); cache[store] = []; }
+      return cache[store];
+    };
     const mine = (list, id) => list.filter((x) => x.AnimalID === animal.AnimalID || x.AnimalID === animal.id);
     const [heat, ai, preg, calving, health, deworming, vaccination, dryOff, purchases, sales, death] = await Promise.all([
       load("heat"), load("insemination"), load("pregnancy"), load("calving"), load("health"),
@@ -855,11 +867,17 @@ JF.RuleEngine = (function () {
 
   /**
    * Re-read the rule configuration from the store/database, dropping the cached
-   * copy. Called when the tab is refocused so a second device's sheet edits (or
+   * copy. Called when the tab is refocused so a second device's edits (or
    * your own edits from the phone) are picked up without a manual reload.
+   * Throttled: tab-switching is frequent, and each unfocused reload costs
+   * three database round trips.
    */
+  let lastFocusLoad = 0;
+  const FOCUS_THROTTLE_MS = 60000; // at most once per minute
   const focus = async () => {
     if (!loadedAt) return;
+    if (Date.now() - lastFocusLoad < FOCUS_THROTTLE_MS) return;
+    lastFocusLoad = Date.now();
     loadedAt = null;
     await load();
   };
@@ -911,7 +929,33 @@ JF.RuleEngine = (function () {
   const isEnabled = () => !!loadedAt && rules.length > 0;
 
   return {
-    init: async () => { await load(); await evaluateAll(); return stats(); },
+    /**
+     * Boot: load the rulebook, then recompute every reminder. The full sweep
+     * writes one reminder per rule per animal and can cost dozens of round
+     * trips, so it is SKIPPED when a sweep already ran recently (6 h) and
+     * reminders exist — a fresh page load then costs nothing but one list.
+     * Pass { forceEvaluate: true } to sweep regardless (Rules screen reload).
+     */
+    init: async ({ forceEvaluate = false } = {}) => {
+      await load();
+      let skip = false;
+      if (!forceEvaluate) {
+        try {
+          const stamp = Number(localStorage.getItem("jf_last_eval") || 0);
+          if (stamp && Date.now() - stamp < 6 * 3600 * 1000) {
+            const existing = await JF.Store.reminders.list();
+            if (existing.length) skip = true;
+          }
+        } catch (e) { /* storage unavailable — always evaluate */ }
+      }
+      if (skip) {
+        console.info("[JF] Rule sweep skipped — reminders are current (evaluated < 6 h ago).");
+      } else {
+        await evaluateAll();
+        try { localStorage.setItem("jf_last_eval", String(Date.now())); } catch (e) {}
+      }
+      return stats();
+    },
     load, ensureLoaded, focus, installDefaults, syncFromMirror, mirrorStatus, evaluateAll, evaluateAnimal, clearReminders, rebuild,
     explain, dataQuality, setRuleField, setParamValue, addOverride, removeOverride, stats, isEnabled,
     listRules, listParams,

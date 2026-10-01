@@ -6,8 +6,9 @@
  *
  *   POST /            { action, payload, token }  ->  { success, data | error }
  *
- * Actions: ping | verify | list | get | create | update | delete | seed |
- *          seedRules | clear | uploadFile (GridFS) | file | files | exportBackup
+ * Actions: ping | verify | bootstrap | list | get | create | update | delete |
+ *          seed | seedRules | clear | uploadFile (GridFS) | file | files |
+ *          exportBackup
  *
  * One MongoDB collection per farm entity (animals, heat, ai, rules, ...) so
  * every record lives with its kind — easy to browse in Atlas and easy to export.
@@ -109,6 +110,20 @@ async function main() {
             at: probe.at,
             message: match ? "MongoDB write/read verified" : "MongoDB round-trip mismatch",
           });
+        }
+
+        // --------------------------------- one-shot boot payload (speed) --
+        // The website used to fire one POST per collection on every page load
+        // (rules, params, animals, heat, reminders, ...). "bootstrap" returns
+        // them ALL in a single round trip - decisive on Render's free tier,
+        // where every extra request costs a cold-start queue.
+        case "bootstrap": {
+          const wanted = Array.isArray(payload.entities) && payload.entities.length
+            ? payload.entities.filter((e) => ENTITIES.has(e))
+            : [...ENTITIES].filter((e) => e !== "files");
+          const out = {};
+          await Promise.all(wanted.map(async (e) => { out[e] = await db.collection(e).find({}).toArray(); }));
+          return ok(res, out);
         }
 
         // ------------------------------------------------------------ CRUD --
@@ -227,6 +242,16 @@ async function main() {
           return ok(res, { database: DB_NAME, exportedAt: new Date().toISOString(), data: dump });
         }
         case "clear": {
+          // DATA PROTECTION: a whole-database wipe is only possible when the
+          // operator supplies the ADMIN_TOKEN that lives ONLY in this server's
+          // environment (Render). The website never holds it, so no visitor -
+          // not even one with the farm API token - can delete the farm's data.
+          // Leave ADMIN_TOKEN unset to make a remote wipe impossible entirely.
+          const admin = String(process.env.ADMIN_TOKEN || "");
+          if (!admin) return fail(res, 403, "clear is disabled: ADMIN_TOKEN is not configured on the server.");
+          if (String(payload.adminToken || "") !== admin) {
+            return fail(res, 403, "clear requires the server's ADMIN_TOKEN (the website cannot send it).");
+          }
           if (String(payload.confirm) !== "DELETE ALL FARM DATA") {
             return fail(res, 400, "clear requires payload.confirm === 'DELETE ALL FARM DATA'");
           }

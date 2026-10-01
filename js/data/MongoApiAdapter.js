@@ -24,7 +24,7 @@ JF.Data = JF.Data || {};
 
 JF.Data.MongoApiAdapter = (function () {
   const { Interface } = JF.Data.DataAdapter;
-  console.info("[JF] MongoApiAdapter v3 — baked-in farm API + URL sanitizer active");
+  console.info("[JF] MongoApiAdapter v4 — bootstrap batching + entity cache active");
 
   // Farm API defaults baked into the code, so every device connects with zero
   // setup. Settings can still override them (localStorage wins when present).
@@ -44,7 +44,56 @@ JF.Data.MongoApiAdapter = (function () {
       this.token = storedTok != null ? storedTok : DEFAULT_TOKEN;
       this.listeners = new Map();
       this.lastStatus = null;
-      this.isPlaceholder = true; // flips false once a real endpoint is configured
+      // Real whenever the endpoint is usable (the baked-in default qualifies),
+      // so homeOf() reports "mongo" and the boot log shows the true backend.
+      this.isPlaceholder = !this._isRealEndpoint();
+      // ---- Speed layer -------------------------------------------------
+      // Render's free tier cold-starts after ~15 idle minutes, so every extra
+      // round trip can cost seconds. The whole boot payload (rules, params,
+      // animals, entries, reminders...) is fetched in ONE "bootstrap" call at
+      // page load and served from a short-lived in-memory cache afterwards;
+      // any write drops that entity's cache entry. A localStorage snapshot
+      // per entity keeps the app usable when the API is unreachable.
+      this._cache = new Map(); // entity -> { at, rows }
+      this._cacheTTL = 30000; // 30s of instant navigation
+    }
+
+    _cacheGet(entity) {
+      const c = this._cache.get(entity);
+      if (!c) return null;
+      if (Date.now() - c.at > this._cacheTTL) { this._cache.delete(entity); return null; }
+      return c.rows.map((r) => ({ ...r })); // copies: callers may mutate freely
+    }
+    _cacheSet(entity, rows) { if (Array.isArray(rows)) this._cache.set(entity, { at: Date.now(), rows }); }
+    _cacheDrop(entity) { this._cache.delete(entity); }
+    _snapshot(entity, rows) { try { localStorage.setItem(`jf_snap_${entity}`, JSON.stringify(rows)); } catch (e) { /* quota — ignore */ } }
+    _snapshotGet(entity) {
+      try {
+        const rows = JSON.parse(localStorage.getItem(`jf_snap_${entity}`) || "null");
+        return Array.isArray(rows) ? rows.map((r) => ({ ...r })) : null;
+      } catch (e) { return null; }
+    }
+
+    /**
+     * Warm the server AND the cache with a single round trip. Called at page
+     * parse time (fire and forget) so the Render cold start overlaps with
+     * font/CSS/JS loading instead of blocking the first view.
+     */
+    async warmup() {
+      try {
+        const data = await this._call("bootstrap", {});
+        if (data && typeof data === "object") {
+          Object.entries(data).forEach(([entity, rows]) => {
+            if (Array.isArray(rows)) { this._cacheSet(entity, rows); this._snapshot(entity, rows); }
+          });
+          console.info(`[JF] Bootstrap: ${Object.keys(data).length} collections fetched in ONE round trip.`);
+        }
+        return data;
+      } catch (e) {
+        // Old server without the bootstrap action? A successful ping still
+        // proves the API is alive (return {} so the caller stays in mongo mode).
+        try { await this._call("ping"); return {}; } catch (e2) { return null; }
+      }
     }
 
     configure({ endpoint, token } = {}) {
@@ -121,11 +170,31 @@ JF.Data.MongoApiAdapter = (function () {
 
     emit(evt, p) { (this.listeners.get(evt) || []).forEach((fn) => fn(p)); }
 
-    async list(entity) { return this._call("list", { entity }); }
+    async list(entity) {
+      const hit = this._cacheGet(entity);
+      if (hit) return hit;
+      try {
+        const rows = await this._call("list", { entity });
+        this._cacheSet(entity, rows);
+        this._snapshot(entity, rows);
+        return rows.map((r) => ({ ...r }));
+      } catch (err) {
+        // API unreachable (cold start timeout, network drop): serve the last
+        // known rows so the farm stays readable. Writes will still fail —
+        // exactly as before — but the screen is never blank.
+        const snap = this._snapshotGet(entity);
+        if (snap && snap.length) {
+          console.warn(`[MongoApi:list] ${entity} unreachable — showing last-known snapshot (${snap.length} rows).`);
+          return snap;
+        }
+        throw err;
+      }
+    }
     async get(entity, id) { return this._call("get", { entity, id }); }
 
     async create(entity, data) {
       const r = await this._call("create", { entity, data });
+      this._cacheDrop(entity);
       this.emit(`${entity}:created`, r);
       this.emit("change", { entity, action: "create", record: r });
       return r;
@@ -133,6 +202,7 @@ JF.Data.MongoApiAdapter = (function () {
 
     async update(entity, id, patch) {
       const r = await this._call("update", { entity, id, patch });
+      this._cacheDrop(entity);
       this.emit(`${entity}:updated`, r);
       this.emit("change", { entity, action: "update", id, record: r });
       return r;
@@ -140,6 +210,7 @@ JF.Data.MongoApiAdapter = (function () {
 
     async delete(entity, id) {
       const r = await this._call("delete", { entity, id });
+      this._cacheDrop(entity);
       this.emit(`${entity}:deleted`, r);
       this.emit("change", { entity, action: "delete", id, record: r });
       return r;

@@ -1,17 +1,15 @@
 JF.Store = (function () {
   let adapter;
   let dataAdapter; // farm DATA adapter (MongoDB farm API or the local mock)
-  let sheetAdapter; // rulebook adapter (Google Sheet) - always present
   let backend = "mock";
   let bridged = false; // set true once app.js bridges events to the CascadeEngine
 
   /**
-   * HYBRID BACKEND: farm data (animals, heat, milk, expenses, reminders...)
-   * lives in the data adapter (MongoDB through the farm API, or this device),
-   * while the three rule entities (Rules / Rule_Parameters / Rule_Overrides)
-   * are routed to the Google Sheet rulebook console when its URL is configured
-   * in Settings. With no sheet configured, rule entities transparently fall
-   * through to the data adapter, so offline behaviour is unchanged.
+   * SINGLE BACKEND: farm data (animals, heat, milk, expenses, reminders...)
+   * AND the three rule entities (Rules / Rule_Parameters / Rule_Overrides)
+   * all live in the same adapter - MongoDB through the farm API, or this
+   * device in offline mode. The former Google Sheet rulebook layer has been
+   * removed; rules are edited in the app's Rules screen and saved to MongoDB.
    */
   const RULE_ENTITIES = new Set(["rules", "ruleParameters", "ruleOverrides"]);
   const makeComposite = (data, sheet) => {
@@ -51,8 +49,7 @@ JF.Store = (function () {
     backend = savedType;
     if (savedType === "mongo") dataAdapter = new JF.Data.MongoApiAdapter();
     else dataAdapter = new JF.Data.MockAdapter();
-    sheetAdapter = new JF.Data.SheetRulesAdapter(dataAdapter);
-    adapter = makeComposite(dataAdapter, sheetAdapter);
+    adapter = makeComposite(dataAdapter, dataAdapter);
     return adapter;
   };
 
@@ -60,17 +57,12 @@ JF.Store = (function () {
   const markBridged = () => { bridged = true; };
 
   const getAdapter = () => adapter;
-  const setBackend = (type) => init(type); // rebuilds both halves (sheet URL/token live in localStorage)
-  /** Configure the Google Sheet rulebook console (Settings -> Rulebook). */
-  const configureRuleSheet = ({ endpoint, token } = {}) => {
-    if (!sheetAdapter) return;
-    sheetAdapter.configure({ endpoint, token });
-  };
-  const getRuleSheetAdapter = () => sheetAdapter;
+  const setBackend = (type) => init(type); // rebuilds the adapter
+  /** Kept for compatibility - the Google Sheet rulebook layer is removed. */
+  const configureRuleSheet = () => {};
+  const getRuleSheetAdapter = () => null;
   /** Which adapter actually holds a given entity right now (for UI hints). */
-  const homeOf = (entity) => (RULE_ENTITIES.has(entity) && sheetAdapter && sheetAdapter._live()
-    ? "sheet"
-    : (backend === "mongo" && dataAdapter && !dataAdapter.isPlaceholder ? "mongo" : "device"));
+  const homeOf = (entity) => (backend === "mongo" && dataAdapter && !dataAdapter.isPlaceholder ? "mongo" : "device");
   const on = (...a) => adapter.on(...a);
   const emit = (...a) => adapter.emit(...a);
 
@@ -184,11 +176,13 @@ JF.Store = (function () {
     init(savedBackend);
   } else {
     init("mongo");
-    // If the baked-in API cannot be reached, drop to the offline device store.
-    dataAdapter.testConnection?.().catch(() => {
-      if (localStorage.getItem("jf_backend")) return; // user chose something meanwhile
-      init("mock");
-    });
+    // One-shot boot fetch: warms the entity cache AND checks reachability in
+    // the same round trip (the old boot fired an expensive ping that counted
+    // every collection). If the baked-in API cannot be reached at all, drop
+    // to the offline device store.
+    Promise.resolve(dataAdapter.warmup?.()).then((data) => {
+      if (!data && !localStorage.getItem("jf_backend")) init("mock");
+    }).catch(() => {});
   }
 
   return api;

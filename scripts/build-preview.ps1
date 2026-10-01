@@ -8,8 +8,8 @@ $root = Split-Path -Parent $PSScriptRoot
 # detects BOM and defaults to UTF-8.
 $html = [IO.File]::ReadAllText((Join-Path $root "index.html"))
 
-# Inline every local <script src="...">
-$html = [regex]::Replace($html, '<script src="([^"]+)"></script>', {
+# Inline every local <script src="..."> (with or without the defer attribute)
+$html = [regex]::Replace($html, '<script[^>]*src="([^"]+)"[^>]*></script>', {
   param($m)
   $p = Join-Path $root ($m.Groups[1].Value -replace "/", "\")
   if (Test-Path $p) { "<script>`n" + [IO.File]::ReadAllText($p) + "`n</script>" } else { $m.Value }

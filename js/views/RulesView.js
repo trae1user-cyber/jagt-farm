@@ -50,7 +50,7 @@ JF.Views.Rules = (function () {
     wrap.appendChild(JF.Utils.el("div", { class: "card", style: "margin-top:16px" }, [
       JF.Utils.el("h3", { style: "margin:0 0 6px" }, "How this drives the farm"),
       JF.Utils.el("p", { class: "field__hint", style: "margin:0" },
-        "Entries are saved to the farm database (MongoDB through the farm API, or this device) → active rules are matched against the animal and its records → Rule_Parameters and any animal Rule_Overrides decide the real value → the engine produces reminders, calculations and alerts → they appear on the dashboard, the reminders list and the animal's timeline. Change a value in the rulebook — the Google Sheet tabs or the database — and the website follows, with no code change."),
+        "Entries are saved to the farm database (MongoDB through the farm API, or this device) → active rules are matched against the animal and its records → Rule_Parameters and any animal Rule_Overrides decide the real value → the engine produces reminders, calculations and alerts → they appear on the dashboard, the reminders list and the animal's timeline. Change a value in the rulebook — on this screen or in the database — and the website follows, with no code change."),
       JF.Utils.el("div", { class: "field__hint", style: "margin-top:8px" },
         `Value layering: rule default < farm parameter < animal override.  Currently reading from: ${s.source}.`),
     ]));
@@ -75,7 +75,7 @@ JF.Views.Rules = (function () {
     wrap.appendChild(JF.Utils.el("div", { class: "card", style: "margin-top:16px" }, [
       JF.Utils.el("h3", { style: "margin:0 0 6px" }, "💾 Where your rules are saved"),
       JF.Utils.el("p", { class: "field__hint", style: "margin:0" },
-        "HYBRID SETUP: your farm DATA (animals, milk, expenses...) lives in MongoDB, while the RULES live in the three tabs of your Google Sheet rulebook (Rules / Rule_Parameters / Rule_Overrides) when its URL is set in Settings. Every toggle, lead time, parameter and override you change here is written straight into the sheet, and edits you make directly in the Sheet appear in the app on the next visit to this tab. No sheet connected? The rules then live with the database/device like before."),
+        "MONGODB SETUP: your farm DATA (animals, milk, expenses...) AND the RULES (Rules / Rule_Parameters / Rule_Overrides) all live in your MongoDB database. Every toggle, lead time, parameter and override you change here is written straight into the database, and edits made on another device appear here on the next visit to this tab. Offline? The rules then live on this device like before."),
       mirrorLine,
       JF.Utils.el("div", { style: "margin-top:10px" }, [pushBtn]),
     ]));
@@ -101,7 +101,7 @@ JF.Views.Rules = (function () {
       const clip = ["=== Rules ===", rulesTsv, "", "=== Rule_Parameters ===", paramsTsv, "",
         "=== How to use ===",
         "This copy is for review or backup: paste into any spreadsheet to audit the rulebook.",
-        "The live source of truth is the rulebook home - the Google Sheet tabs when connected, otherwise the farm database.",
+        "The live source of truth is the MongoDB rulebook collections (or this device in offline mode).",
       ].join("\n");
       try { await navigator.clipboard.writeText(clip); } catch (e) {
         const ta = document.createElement("textarea");
@@ -115,7 +115,7 @@ JF.Views.Rules = (function () {
     wrap.appendChild(JF.Utils.el("div", { class: "card", style: "margin-top:16px" }, [
       JF.Utils.el("h3", { style: "margin:0 0 6px" }, "📄 Export the rulebook"),
       JF.Utils.el("p", { class: "field__hint", style: "margin:0" },
-        "Copy the complete rulebook (rules, parameters) as tab-separated text - open any spreadsheet and paste to review, print or back it up. The live source of truth is your rulebook home: the Google Sheet tabs when connected, otherwise the farm database."),
+        "Copy the complete rulebook (rules, parameters) as tab-separated text - open any spreadsheet and paste to review, print or back it up. The live source of truth is the MongoDB rulebook collections (or this device offline)."),
       JF.Utils.el("div", { style: "margin-top:10px" }, [tsvBtn]),
       tsvLine,
     ]));
@@ -127,7 +127,7 @@ JF.Views.Rules = (function () {
       render(["rules"]);
     });
 
-    const reloadBtn = JF.Utils.el("button", { class: "btn btn--ghost btn--sm", type: "button" }, "🔄 Reload from Sheet/Database");
+    const reloadBtn = JF.Utils.el("button", { class: "btn btn--ghost btn--sm", type: "button" }, "🔄 Reload from Database");
     reloadBtn.onclick = run(reloadBtn, async () => {
       const r = await JF.RuleEngine.load();
       msg(status, `Loaded ${r.rules} rules, ${r.params} parameters, ${r.overrides} overrides from ${r.source}.`);
@@ -163,11 +163,9 @@ JF.Views.Rules = (function () {
     // the data backend; mock device store when nothing is connected.)
     try {
       const m = await JF.RuleEngine.mirrorStatus();
-      if (mirrorLine) mirrorLine.textContent = m.home === "sheet"
-        ? `HYBRID LIVE — farm data in the database, rules read/written to the Google Sheet tabs (${m.rules} rule row(s), ${m.params} parameter row(s) visible). Sheet edits load here on tab focus or with Reload.`
-        : m.home === "mongo"
-          ? `Rules live in MongoDB (no Sheet URL configured yet) - ${m.rules} rule row(s), ${m.params} parameter row(s). Add the Google Sheet rulebook in Settings to edit rules like a spreadsheet.`
-          : `Offline/local mode — your edits persist on this device (${m.rules} rule row(s), ${m.params} parameter row(s)). Connect the database and the Google Sheet rulebook in Settings to share them across devices.`;
+      if (mirrorLine) mirrorLine.textContent = m.home === "mongo"
+        ? `MongoDB LIVE — farm data AND rules are stored in MongoDB (${m.rules} rule row(s), ${m.params} parameter row(s)). Edits here save straight to the database and apply on every device.`
+        : `Offline/local mode — your edits persist on this device (${m.rules} rule row(s), ${m.params} parameter row(s)). Connect the MongoDB farm API in Settings to share them across devices.`;
     } catch (e) { if (mirrorLine) mirrorLine.textContent = ""; }
     return wrap;
   };
