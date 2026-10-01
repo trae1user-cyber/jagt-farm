@@ -3067,6 +3067,7 @@ JF.Data = JF.Data || {};
 
 JF.Data.MongoApiAdapter = (function () {
   const { Interface } = JF.Data.DataAdapter;
+  console.info("[JF] MongoApiAdapter v3 — baked-in farm API + URL sanitizer active");
 
   // Farm API defaults baked into the code, so every device connects with zero
   // setup. Settings can still override them (localStorage wins when present).
@@ -3090,7 +3091,13 @@ JF.Data.MongoApiAdapter = (function () {
     }
 
     configure({ endpoint, token } = {}) {
-      if (endpoint !== undefined) { this.endpoint = endpoint; try { localStorage.setItem("jf_api_endpoint", endpoint); } catch (e) {} }
+      if (endpoint !== undefined) {
+        // Store only bare origins; anything with a path tail (a URL+token paste)
+        // is replaced by the baked-in default so it can never poison the app.
+        const clean = String(endpoint || "").trim();
+        this.endpoint = /^https?:\/\/[^/]+\/?$/.test(clean) ? clean : DEFAULT_ENDPOINT;
+        try { localStorage.setItem("jf_api_endpoint", this.endpoint); } catch (e) {}
+      }
       if (token !== undefined) { this.token = token; try { localStorage.setItem("jf_api_token", token); } catch (e) {} }
       this.isPlaceholder = !this._isRealEndpoint();
     }
