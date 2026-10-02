@@ -24,7 +24,7 @@ JF.Data = JF.Data || {};
 
 JF.Data.MongoApiAdapter = (function () {
   const { Interface } = JF.Data.DataAdapter;
-  console.info("[JF] MongoApiAdapter v4 — bootstrap batching + entity cache active");
+  console.info("[JF] MongoApiAdapter v5 — token self-heal + snapshot-consistent writes");
 
   // Entities that an older server deployment (API v1.0.x) does not recognise.
   // While the capability probe reports an old server, these are served as
@@ -62,6 +62,13 @@ JF.Data.MongoApiAdapter = (function () {
       this._cache = new Map(); // entity -> { at, rows }
       this._cacheTTL = 30000; // 30s of instant navigation
       this._serverCapabilities = null; // set by warmup()'s version probe
+      this._tokenWarned = false; // one warning per session for a real token mismatch
+      // A stored token that differs from the baked-in one MIGHT be stale. Until
+      // warmup() proves it good (or heals it), the first list() calls hold back
+      // so a stale-token boot cannot spray 401s across a dozen parallel calls.
+      this._tokenUnverified = storedTok != null && storedTok !== DEFAULT_TOKEN;
+      this._tokenOkResolve = null;
+      if (this._tokenUnverified) this._tokenOk = new Promise((res) => { this._tokenOkResolve = res; });
     }
 
     _cacheGet(entity) {
@@ -73,6 +80,16 @@ JF.Data.MongoApiAdapter = (function () {
     _cacheSet(entity, rows) { if (Array.isArray(rows)) this._cache.set(entity, { at: Date.now(), rows }); }
     _cacheDrop(entity) { this._cache.delete(entity); }
     _snapshot(entity, rows) { try { localStorage.setItem(`jf_snap_${entity}`, JSON.stringify(rows)); } catch (e) { /* quota — ignore */ } }
+    /** Keep the offline snapshot in step with writes, so a deleted row can
+     *  never reappear from the snapshot while the API is unreachable. */
+    _snapshotEdit(entity, fn) {
+      try {
+        const rows = JSON.parse(localStorage.getItem(`jf_snap_${entity}`) || "null");
+        if (!Array.isArray(rows)) return;
+        const next = fn(rows);
+        if (next) localStorage.setItem(`jf_snap_${entity}`, JSON.stringify(next));
+      } catch (e) { /* ignore */ }
+    }
     _snapshotGet(entity) {
       try {
         const rows = JSON.parse(localStorage.getItem(`jf_snap_${entity}`) || "null");
@@ -135,31 +152,75 @@ JF.Data.MongoApiAdapter = (function () {
       return !!ep && !/YOUR_API_URL|localhost-placeholder/i.test(ep);
     }
 
+    _tokenProven() {
+      if (this._tokenUnverified) {
+        this._tokenUnverified = false;
+        if (this._tokenOkResolve) { this._tokenOkResolve(); this._tokenOkResolve = null; }
+      }
+    }
+
+    async _post(action, payload = {}) {
+      const res = await fetch(this.endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, payload, token: this.token || "" }),
+      });
+      const text = await res.text();
+      let json;
+      try { json = JSON.parse(text); }
+      catch (parseErr) {
+        if (/<\s*(!doctype|html|body)/i.test(text)) throw new Error("The API URL answered with a web page instead of JSON - check that it points at the farm API (e.g. https://jagt-api.onrender.com).");
+        throw new Error("The API URL answered with something the app cannot read (status " + res.status + ").");
+      }
+      // Token rejections (401) are recoverable — _call() retries with the
+      // built-in token — so mark them instead of treating them like any error.
+      if (res.status === 401 || (!json.success && /invalid farm api token/i.test(String(json.error || "")))) {
+        const e = new Error(json.error || "Invalid farm API token");
+        e.status = 401;
+        throw e;
+      }
+      if (!json.success) throw new Error(json.error || "Farm API call failed");
+      this._tokenProven();
+      return json.data;
+    }
+
     async _call(action, payload = {}, { quiet = false } = {}) {
       if (!this._isRealEndpoint()) {
         if (!quiet) console.warn(`[MongoApi] Offline stub mode (${action}) - configure the farm API URL in Settings to go live.`);
         return this._fallback(action, payload);
       }
+      const usedToken = this.token; // token a racer may have healed mid-flight
       try {
-        const res = await fetch(this.endpoint, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action, payload, token: this.token || "" }),
-        });
-        const text = await res.text();
-        let json;
-        try { json = JSON.parse(text); }
-        catch (parseErr) {
-          if (/<\s*(!doctype|html|body)/i.test(text)) throw new Error("The API URL answered with a web page instead of JSON - check that it points at the farm API (e.g. https://jagt-api.onrender.com).");
-          throw new Error("The API URL answered with something the app cannot read (status " + res.status + ").");
-        }
-        if (!json.success) throw new Error(json.error || "Farm API call failed");
-        return json.data;
+        return await this._post(action, payload);
       } catch (err) {
-        // Known, handled degradations (old server missing a newer entity/action)
-        // get ONE short line — the call sites already cope, so a full stack
-        // trace would be noise, not signal.
-        if (/Unknown (entity|action)/i.test(String(err.message))) {
+        // A token saved in this browser by an older deploy no longer matches the
+        // server. Self-heal: drop the stored token, fall back to the one baked
+        // into the code, and retry ONCE — silently if it works.
+        if (err.status === 401) {
+          if (this.token !== usedToken) {
+            // Another request already healed the token — just retry with it.
+            try { return await this._post(action, payload); } catch (err2) { err = err2; }
+          } else if (usedToken !== DEFAULT_TOKEN) {
+            try { localStorage.removeItem("jf_api_token"); } catch (e) {}
+            this.token = DEFAULT_TOKEN;
+            this._tokenProven(); // healed: waiting calls may proceed
+            try {
+              const r = await this._post(action, payload);
+              console.info("[MongoApi] stale API token in this browser replaced with the built-in one — reconnected.");
+              return r;
+            } catch (err2) { err = err2; }
+          }
+        }
+        // Known, handled degradations get ONE short line — the call sites
+        // already cope, so a full stack trace would be noise, not signal.
+        if (err.status === 401 || /invalid farm api token/i.test(String(err.message))) {
+          // A REAL mismatch (server token changed) is warned once per session,
+          // not once per call.
+          if (!quiet && !this._tokenWarned) {
+            this._tokenWarned = true;
+            console.warn(`[MongoApi] the server rejects this browser's farm API token — last-known data is shown until the token matches (Settings → API, or redeploy with the matching token).`);
+          }
+        } else if (/Unknown (entity|action)/i.test(String(err.message))) {
           console.warn(`[MongoApi:${action}] ${err.message} (older server deploy — the site degrades gracefully; redeploying the API removes this).`);
         } else if (!quiet) {
           console.error(`[MongoApi:${action}]`, err);
@@ -200,6 +261,11 @@ JF.Data.MongoApiAdapter = (function () {
     emit(evt, p) { (this.listeners.get(evt) || []).forEach((fn) => fn(p)); }
 
     async list(entity) {
+      // Stale-token boot: hold the first reads until warmup() has validated (or
+      // healed) the token, so recovery happens before any parallel call fires.
+      if (this._tokenUnverified && this._tokenOk) {
+        await Promise.race([this._tokenOk, new Promise((r) => setTimeout(r, 10000))]);
+      }
       // Old server deployment: entities it does not know are served as empty
       // straight away — no request, no 400, no console noise. The capability
       // flag refreshes on every boot (warmup), so redeploying the API simply
@@ -236,6 +302,7 @@ JF.Data.MongoApiAdapter = (function () {
     async create(entity, data) {
       const r = await this._call("create", { entity, data });
       this._cacheDrop(entity);
+      if (r) this._snapshotEdit(entity, (rows) => { rows.push(r); return rows; });
       this.emit(`${entity}:created`, r);
       this.emit("change", { entity, action: "create", record: r });
       return r;
@@ -244,6 +311,12 @@ JF.Data.MongoApiAdapter = (function () {
     async update(entity, id, patch) {
       const r = await this._call("update", { entity, id, patch });
       this._cacheDrop(entity);
+      this._snapshotEdit(entity, (rows) => {
+        const i = rows.findIndex((x) => String(x.id) === String(id));
+        if (i < 0) return null;
+        rows[i] = { ...rows[i], ...patch, ...(r && typeof r === "object" ? r : {}) };
+        return rows;
+      });
       this.emit(`${entity}:updated`, r);
       this.emit("change", { entity, action: "update", id, record: r });
       return r;
@@ -252,6 +325,9 @@ JF.Data.MongoApiAdapter = (function () {
     async delete(entity, id) {
       const r = await this._call("delete", { entity, id });
       this._cacheDrop(entity);
+      // Remove the row from the offline snapshot too, so the deleted entry
+      // cannot reappear the next time the API is unreachable.
+      this._snapshotEdit(entity, (rows) => rows.filter((x) => String(x.id) !== String(id)));
       this.emit(`${entity}:deleted`, r);
       this.emit("change", { entity, action: "delete", id, record: r });
       return r;

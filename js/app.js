@@ -238,10 +238,26 @@ JF.App = (function () {
         // re-enter itself while it is writing its own output.
         const ENTRY_ENTITIES = new Set(["animals", "heat", "insemination", "pregnancy", "calving",
           "health", "deworming", "vaccination", "dryOff", "death", "purchases", "sales"]);
+        // Deleting (or editing) an entry can invalidate reminders that were
+        // computed from it — e.g. a heat recorded by mistake, then removed. The
+        // server's delete reply carries no AnimalID, so a herd-wide recompute
+        // (debounced) supersedes the stale reminders instead of leaving them.
+        let resweepTimer = null;
+        const scheduleResweep = () => {
+          clearTimeout(resweepTimer);
+          resweepTimer = setTimeout(() => { JF.RuleEngine.evaluateAll().catch(() => {}); }, 2000);
+        };
         JF.Store.on("change", ({ entity, action, record }) => {
-          if (action !== "create" || !record || !ENTRY_ENTITIES.has(entity)) return;
-          const id = record.AnimalID || (entity === "animals" ? record.id : null);
-          if (id) JF.RuleEngine.evaluateAnimal(id).catch(() => {});
+          if (!ENTRY_ENTITIES.has(entity)) return;
+          if (action === "create" && record) {
+            const id = record.AnimalID || (entity === "animals" ? record.id : null);
+            if (id) JF.RuleEngine.evaluateAnimal(id).catch(() => {});
+          } else if (action === "delete") {
+            scheduleResweep();
+          } else if (action === "update" && entity !== "animals" && record) {
+            const id = record.AnimalID || null;
+            if (id) JF.RuleEngine.evaluateAnimal(id).catch(() => {});
+          }
         });
         // Persistence: when the tab is refocused, re-read the rule configuration from
         // the store (MongoDB when the farm API is connected) so edits made elsewhere

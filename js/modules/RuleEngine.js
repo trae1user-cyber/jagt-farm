@@ -217,7 +217,11 @@ JF.RuleEngine = (function () {
     const load = async (store) => {
       if (cache[store]) return cache[store];
       try { cache[store] = await JF.Store[store].list(); }
-      catch (e) { console.warn(`[RuleEngine] ${store} unavailable — evaluating without it.`, e.message); cache[store] = []; }
+      catch (e) {
+        console.warn(`[RuleEngine] ${store} unavailable — evaluating without it.`, e.message);
+        cache[store] = [];
+        cache._degraded = true; // data is incomplete: stale-reminder cleanup must stand down
+      }
       return cache[store];
     };
     const mine = (list, id) => list.filter((x) => x.AnimalID === animal.AnimalID || x.AnimalID === animal.id);
@@ -261,9 +265,12 @@ JF.RuleEngine = (function () {
       return { due: today(), base: d[d.length - 1].Date, note: `Same drug class twice in a row (${b})` };
     },
     // Return to heat across episodes: AI then a new heat 18-24 days later.
+    // The NEWEST heat after the AI wins: a later heat record supersedes any
+    // earlier one (the farm sometimes records a suspected heat that turns out
+    // to be another sign — the latest observation is the one to act on).
     "HE-022": (ctx) => {
       const ai = ctx.ai[ctx.ai.length - 1]; if (!ai) return null;
-      const heat = ctx.heat.find((h) => h.HeatDate > ai.Date);
+      const heat = [...ctx.heat].reverse().find((h) => h.HeatDate > ai.Date);
       if (!heat) return null;
       const gap = Math.abs(daysBetween(ai.Date, heat.HeatDate));
       if (gap < 17 || gap > 25) return null;
@@ -654,7 +661,25 @@ JF.RuleEngine = (function () {
 
       const valueInfo = resolve(rule, animal.AnimalID);
       const res = compute(rule, ctx, valueInfo.value);
-      if (!res) continue;
+      if (!res) {
+        // Determinism: the engine no longer produces this rule for this animal
+        // (its trigger entry was deleted, or a newer record supersedes it — e.g.
+        // a NEW heat recorded before the next expected heat makes reminders
+        // computed from the OLD heat obsolete). Close any open reminder it left
+        // behind instead of letting a stale date dangle forever. Skipped when
+        // entity data was unreadable this pass, so a network hiccup can never
+        // close valid reminders.
+        if (!cache._degraded && existing && existing.Status !== "Completed") {
+          try {
+            await JF.Store.reminders.update(existing.id, {
+              Status: "Completed", CompletedAt: today(),
+              Notes: `${existing.Notes || ""} [superseded: newer records changed this rule's outcome]`.trim(),
+            });
+            completed++;
+          } catch (e) { /* keep going */ }
+        }
+        continue;
+      }
 
       // CHECK rules are surfaced in the data-quality panel; STATUS / CREATE_EVENT
       // are carried out by the lifecycle + cascade layer (status changes, calf
@@ -699,6 +724,19 @@ JF.RuleEngine = (function () {
         } else {
           await JF.Store.reminders.create(payload);
           created++;
+        }
+        // One open row per rule per animal is the contract (ReminderID is
+        // deterministic). Any OTHER open row with this RuleID is a leftover
+        // computed from an older record — e.g. a heat that a newer heat has
+        // replaced — so it is superseded here instead of reappearing forever.
+        for (const stale of mine) {
+          if (String(stale.RuleID) !== ruleId || String(stale.id) === String(target?.id)) continue;
+          if (stale.Status === "Completed") continue;
+          await JF.Store.reminders.update(stale.id, {
+            Status: "Completed", CompletedAt: today(),
+            Notes: `${stale.Notes || ""} [superseded: newer records changed this reminder]`.trim(),
+          });
+          completed++;
         }
       } catch (e) { console.warn(`[RuleEngine] ${ruleId} ${animal.AnimalID}:`, e.message); }
     }
