@@ -184,21 +184,56 @@ JF.Views.Reproduction = (function () {
       ]);
       page.appendChild(calCard);
     } else {
-      // heatRecords
-      const rows = heats.map(h => ({
-        animalId: h.AnimalID,
-        cols: [
-          `<strong>${h.HeatRecordID || "HEAT-REC"}</strong>`,
-          h.AnimalID || "—",
-          JF.Utils.formatDate(h.HeatDate, "dd MMM yyyy"),
-          h.HeatTime || "Morning",
-          h.DetectionMethod || "Visual",
-          `<span class="badge badge--warning">${h.HeatIntensity || "Strong"}</span>`,
-          h.Symptoms || "Standing Heat",
-          h.Notes || "—"
-        ]
-      }));
-      page.appendChild(renderTable(["Heat ID", "Animal ID", "Date", "Time", "Detection Method", "Intensity", "Symptoms", "Notes"], rows));
+      // heatRecords — enriched: which AI followed the heat (with its time), and
+      // the next expected heat window (heat + 18-24d cycle from parameters).
+      const animals = (await JF.Store.animals.list()) || [];
+      const nameOf = (id) => { const a = animals.find((x) => x.AnimalID === id || x.id === id); return a ? (a.Name || a.AnimalID) : (id || "—"); };
+      const aiOf = (h) => {
+        const hd = String(h.HeatDate || "");
+        if (!hd) return null;
+        return insem
+          .filter((i) => i.AnimalID === h.AnimalID && i.Date && i.Date >= hd && JF.Utils.daysBetween(hd, i.Date) <= 3)
+          .sort((a, b) => String(a.Date).localeCompare(String(b.Date)))[0] || null;
+      };
+      const cycleMin = 18, cycleAvg = 21, cycleMax = 24;
+      const nextWin = (hd) => {
+        if (!hd) return null;
+        const lo = JF.Utils.formatDate(JF.Utils.addDays(hd, cycleMin), "dd MMM");
+        const mid = JF.Utils.formatDate(JF.Utils.addDays(hd, cycleAvg), "dd MMM");
+        const hi = JF.Utils.formatDate(JF.Utils.addDays(hd, cycleMax), "dd MMM");
+        return `${lo} – ${hi} (aim ${mid})`;
+      };
+      const rows = heats.slice().sort((a, b) => String(b.HeatDate || "").localeCompare(String(a.HeatDate || ""))).map(h => {
+        const ai = aiOf(h);
+        const openDays = (() => {
+          if (!h.HeatDate) return null;
+          const d = JF.Utils.daysBetween(h.HeatDate, JF.Utils.todayISO());
+          if (ai) return null; // served — window closed
+          if (d < 0) return "upcoming";
+          return d;
+        })();
+        return {
+          animalId: h.AnimalID,
+          cols: [
+            `<strong>${nameOf(h.AnimalID)}</strong><div class="field__hint">${h.AnimalID || ""}</div>`,
+            `${JF.Utils.formatDate(h.HeatDate, "dd MMM yyyy")}<div class="field__hint">${h.HeatTime || ""}</div>`,
+            h.DetectionMethod || "Visual",
+            `<span class="badge badge--warning">${h.HeatIntensity || "Strong"}</span><div class="field__hint">${Array.isArray(h.Symptoms) ? h.Symptoms.slice(0, 2).join(", ") : (h.Symptoms || "")}</div>`,
+            ai
+              ? `<span class="badge badge--accent">💉 AI ${JF.Utils.formatDate(ai.Date, "dd MMM")}${ai.Time ? " · " + ai.Time : ""}</span>`
+              : (openDays === "upcoming"
+                  ? `<span class="badge badge--info">window opens ${nextWin(h.HeatDate).split(" – ")[0]}</span>`
+                  : openDays == null ? "—" : `<span class="badge badge--warning">not served · ${openDays}d</span>`),
+            nextWin(h.HeatDate) || "—",
+            h.Notes || "—",
+          ],
+        };
+      });
+      page.appendChild(renderTable(["Animal", "Heat observed", "Detection", "Intensity & signs", "AI after this heat", "Next expected heat", "Notes"], rows));
+      page.appendChild(JF.Utils.el("div", { class: "card", style: { padding: "var(--space-3)", marginTop: "var(--space-3)" } }, [
+        JF.Utils.el("div", { class: "field__hint" },
+          "Next-expected window uses the 18–24 day cycle (aim for day 21). An AI recorded within 3 days after the heat closes its window automatically. Record the AI time and the Heat Detective grades the timing."),
+      ]));
     }
 
     root.appendChild(page);

@@ -410,8 +410,21 @@ JF.RuleEngine = (function () {
     // date, so a single past entry must never complete the *next* review.
     const ageBased = trigger === "BIRTH" || trigger === "ANIMAL_CREATED";
     if (ageBased && cat === "Deworming") {
-      const need = rule.RuleID === "DW-017B" ? 2 : 1;
-      return ctx.deworming.filter((d) => d.Date).length >= need;
+      const recs = ctx.deworming.filter((d) => d.Date);
+      // Second dewormer: two doses complete it outright — or ONE dose given
+      // around the due date (±14 d), because that IS the due dose. The farmer
+      // records "a dewormer", not "dose #2", so a strict count left the
+      // reminder overdue forever after the animal was actually treated.
+      if (rule.RuleID === "DW-017B") {
+        if (recs.length >= 2) return true;
+        const dob = ctx.animal.DateOfBirth;
+        if (dob) {
+          const due = addDays(dob, Number(resolve(rule, ctx.animal.AnimalID).value) || 45);
+          return recs.some((d) => Math.abs(JF.Utils.daysBetween(due, d.Date)) <= 14);
+        }
+        return false;
+      }
+      return recs.length >= 1;
     }
     if (ageBased && cat === "Vaccination") {
       const hit = VACCINE_KEYS.find(([nameRe]) => nameRe.test(`${rule.RuleName} ${rule.Condition || ""}`));
@@ -741,6 +754,23 @@ JF.RuleEngine = (function () {
       } catch (e) { console.warn(`[RuleEngine] ${ruleId} ${animal.AnimalID}:`, e.message); }
     }
 
+    // Housekeeping: reminders for animals that no longer exist (deleted from
+    // the herd) are orphaned rows — the views filter by animal join, but badge
+    // counts and the reminders list keep showing them. Close them here (once
+    // per sweep: the flag lives on the shared evaluation cache).
+    if (cache.allReminders && !cache._degraded && !cache._orphansClosed) {
+      cache._orphansClosed = true;
+      const ids = new Set(animals.map((a) => a.AnimalID || a.id));
+      for (const r of cache.allReminders) {
+        if (r.AnimalID && !ids.has(r.AnimalID) && r.Status !== "Completed" && r.Status !== "Dismissed") {
+          try {
+            await JF.Store.reminders.update(r.id, { Status: "Completed", CompletedAt: today(), Notes: `${r.Notes || ""} [closed: animal no longer in the herd]`.trim() });
+            completed++;
+          } catch (e) { /* keep going */ }
+        }
+      }
+    }
+
     if (created || updated) await audit("evaluate", "Animals", animal.AnimalID, `+${created} new, ~${updated} recalculated, ${completed} completed (rules: ${loadSource})`);
     return { created, completed, updated };
   };
@@ -981,8 +1011,15 @@ JF.RuleEngine = (function () {
         try {
           const stamp = Number(localStorage.getItem("jf_last_eval") || 0);
           if (stamp && Date.now() - stamp < 6 * 3600 * 1000) {
-            const existing = await JF.Store.reminders.list();
-            if (existing.length) skip = true;
+            const [existing, animals] = await Promise.all([JF.Store.reminders.list(), JF.Store.animals.list()]);
+            const active = animals.filter((a) => !["Sold", "Deceased"].includes(a.CurrentStatus));
+            // Skip only when every animal already has at least one reminder row.
+            // A freshly added animal (or one whose evaluation failed during an
+            // outage) would otherwise wait up to 6 h for its care plan — the
+            // "why is there no first-dewormer reminder?" bug.
+            const covered = new Set(existing.map((r) => r.AnimalID));
+            skip = existing.length > 0 && active.every((a) => covered.has(a.AnimalID || a.id));
+            if (!skip && existing.length) console.info("[JF] Some animals have no reminders yet — running a catch-up sweep.");
           }
         } catch (e) { /* storage unavailable — always evaluate */ }
       }

@@ -2037,10 +2037,25 @@ JF.CareSchedule = (function () {
   };
 
   const syncForAnimalInner = async (animalId) => {
-    // The sheet-driven RuleEngine supersedes this fixed plan: its calf rules
-    // (CF-*, DW-013, DW-017B, VAC-*) cover the same ground but stay editable in
-    // the Rules sheet. Keep this engine as the fallback only.
-    if (JF.RuleEngine && JF.RuleEngine.isEnabled && JF.RuleEngine.isEnabled()) return 0;
+    // The rule engine supersedes this fixed plan: its calf rules (CF-*, DW-013,
+    // DW-017B, VAC-*) cover the same ground but stay editable in the Rules
+    // screen. Rows created by THIS engine before the rule engine was armed are
+    // closed here — otherwise they become zombies that never complete when a
+    // dose is recorded (the rule engine does not know them) and the farm sees
+    // every care task twice.
+    if (JF.RuleEngine && JF.RuleEngine.isEnabled && JF.RuleEngine.isEnabled()) {
+      const existing = (await JF.Store.reminders.list())
+        .filter((r) => String(r.ReferenceID || "").startsWith(REF_PREFIX + animalId) && !["Completed", "Dismissed"].includes(r.Status));
+      for (const r of existing) {
+        try {
+          await JF.Store.reminders.update(r.id, {
+            Status: "Completed", CompletedAt: JF.Utils.todayISO(),
+            Notes: `${r.Notes || ""} [superseded: the rule engine's care plan covers this]`.trim(),
+          });
+        } catch (e) { /* keep going */ }
+      }
+      return existing.length;
+    }
     const a = (await JF.Store.animals.list()).find((x) => x.AnimalID === animalId || x.id === animalId);
     if (!a || !a.DateOfBirth) return 0;
     const dob = a.DateOfBirth;
@@ -2422,6 +2437,163 @@ JF.LifeCycle = (function () {
   };
 
   return { loadAll, lifecycleOf, snapshot, calvingBoard, medicalEconomics, restoreAfterRecovery, runAgePromotions, MEDICAL_CATEGORIES, init };
+})();
+
+</script>
+  <script>
+window.JF = window.JF || {};
+
+/**
+ * PhaseEngine - the farm's automatic life-phase & asset-value engine.
+ *
+ * PHASES (females; males are Calf -> Young Bull -> Bull):
+ *   Calf        : female under ~6 months (or no DOB known but marked Calf)
+ *   Heifer      : female >= 6 months, never calved, not confirmed pregnant
+ *   Preg Heifer : never calved + latest pregnancy check Positive (or expected
+ *                 calving in the future confirmed by records)
+ *   Cow         : has calved (lactating when inside a lactation, Dry after a
+ *                 dry-off, Open/Pregnant between cycles) — grouped "Milking Herd"
+ *   The animal master's CurrentStatus keeps the classic values the rest of the
+ *   app already speaks (Calf/Heifer/Pregnant/Lactating/Dry/Open/...); Category
+ *   and CurrentGroup follow the phase so lists and groups agree.
+ *
+ * ASSET VALUES (farm's fixed schedule, written to the journal automatically):
+ *   non-pregnant calf  ₹70,000 · pregnant heifer ₹1,20,000 · calved/lactating cow ₹1,80,000
+ *   A revaluation journal entry (Dr Livestock · Cr/Ld Owner Capital) is posted
+ *   whenever an animal's phase value changes — idempotent, one row per change.
+ *
+ * Nothing here invents facts: phases derive from DOB + calving + pregnancy
+ * records, and every phase change is stamped UpdatedAt with the source.
+ */
+JF.PhaseEngine = (function () {
+
+  const VALUES = { calf: 70000, pregHeifer: 120000, cow: 180000 };
+
+  const todayISO = () => JF.Utils.todayISO();
+  const byDate = (a, b) => String(a).localeCompare(String(b));
+
+  const phaseValue = (phase, pregnant) => {
+    if (phase === "Calf") return VALUES.calf;
+    if (phase === "Heifer" || phase === "Bull") return VALUES.calf; // young stock
+    if (phase === "Preg Heifer") return VALUES.pregHeifer;
+    if (phase === "Cow") return VALUES.cow; // calved/lactating (incl. dry & open cows)
+    return null;
+  };
+
+  /** Derived phase for one animal from raw records. Pure. */
+  const phaseOf = (a, d) => {
+    const id = a.AnimalID || a.id;
+    const female = (a.Gender || "Female") === "Female";
+    if (["Sold", "Deceased"].includes(a.CurrentStatus)) return { phase: a.CurrentStatus, group: a.CurrentGroup, value: null, reason: "left the herd" };
+
+    const calvings = (d.calving || []).filter((c) => c.AnimalID === id).map((c) => c.Date || c.CalvingDate).filter(Boolean).sort(byDate);
+    const parity = calvings.length;
+    const ageDays = a.DateOfBirth ? JF.Utils.daysBetween(a.DateOfBirth, todayISO()) : null;
+
+    // Pregnancy: latest positive check (or a future expected calving) AFTER the last calving.
+    const lastCalving = parity ? calvings[parity - 1] : null;
+    const positives = (d.pregnancy || [])
+      .filter((p) => p.AnimalID === id && String(p.Result || "").toLowerCase() === "positive" && p.Date)
+      .map((p) => p.Date).sort(byDate);
+    const lastPositive = positives[positives.length - 1] || null;
+    const pregnant = !!lastPositive && (!lastCalving || lastPositive > lastCalving);
+
+    if (!female) {
+      const phase = parity > 0 || (ageDays != null && ageDays > 365) ? "Bull" : "Calf";
+      return { phase, group: phase === "Bull" ? "Breeding" : "Young Stock", value: phaseValue(phase), reason: "male line" };
+    }
+    if (parity > 0) {
+      // Cow: dry only when a dry-off happened after the last calving.
+      const dryOffs = (d.dryOff || []).filter((x) => x.AnimalID === id).map((x) => x.Date).filter(Boolean).sort(byDate);
+      const lastDry = dryOffs[dryOffs.length - 1] || null;
+      const dry = lastDry && (!lastCalving || lastDry > lastCalving);
+      const phase = "Cow";
+      return { phase, group: "Milking Herd", status: dry ? "Dry" : "Lactating", value: phaseValue(phase), reason: `${parity} calving(s)` };
+    }
+    if (pregnant) {
+      return { phase: "Preg Heifer", group: "Breeding", status: "Pregnant", value: phaseValue("Preg Heifer"), reason: `positive check ${lastPositive}, no calving yet` };
+    }
+    if (ageDays == null) {
+      // No DOB: trust the stored status if it is a phase word, else classify as heifer.
+      const guess = ["Calf", "Heifer"].includes(a.CurrentStatus) ? a.CurrentStatus : "Heifer";
+      return { phase: guess, group: guess === "Calf" ? "Young Stock" : "Breeding", value: phaseValue(guess), reason: "no DOB — kept current phase" };
+    }
+    const phase = ageDays < 180 ? "Calf" : "Heifer";
+    return { phase, group: ageDays < 180 ? "Young Stock" : "Breeding", status: ageDays < 180 ? "Calf" : "Open", value: phaseValue(phase), reason: `${ageDays}d old` };
+  };
+
+  /**
+   * Keep the Livestock asset for this animal EQUAL to the phase value. The
+   * journal delta posted = phase value − already-booked value, where booked =
+   * the purchase price (if any) + every prior phase-revaluation row. So a
+   * purchased cow booked at cost is topped up (or written down) to the farm's
+   * fixed schedule, and each Calf→Preg Heifer→Cow step-up posts only its step.
+   */
+  const postRevaluation = async (animal, value, phase) => {
+    const id = animal.AnimalID || animal.id;
+    const journal = await JF.Store.journal.list();
+    const mine = journal.filter((j) => j.ReferenceID && String(j.ReferenceID).startsWith(`PHASE-REVAL-${id}-`));
+    const purchaseBooked =
+      Number(animal.PurchasePrice || 0) ||
+      (await JF.Store.purchases.list().catch(() => [])).filter((p) => p.AnimalID === id).reduce((s, p) => s + Number(p.PurchasePrice || p.TotalCost || 0), 0);
+    const booked = purchaseBooked + mine.reduce((s, j) => s + (j.CreditAccount === "Livestock" ? -Number(j.Amount || 0) : Number(j.Amount || 0)), 0);
+    const delta = Math.round(value - booked);
+    if (Math.abs(delta) < 1) return false;
+    const ref = `PHASE-REVAL-${id}-${mine.length + 1}-${String(phase).replace(/\s+/g, "")}`;
+    const up = delta > 0; // up: Dr Livestock / Cr Owner Capital; down: reversed
+    await JF.Store.journal.create({
+      JournalID: `JNL-${JF.Utils.uid("j")}`,
+      Date: todayISO(),
+      DebitAccount: up ? "Livestock" : "Owner Capital",
+      CreditAccount: up ? "Owner Capital" : "Livestock",
+      Amount: Math.abs(delta),
+      AnimalID: id,
+      ReferenceID: ref,
+      TransactionType: "Asset Revaluation",
+      Description: `${animal.Name || id} → ${phase}: livestock asset value ${up ? "increased to" : "reduced to"} ₹${value.toLocaleString("en-IN")}`,
+    });
+    return true;
+  };
+
+  /** Sync phases (and asset values) for the whole herd. Returns change count. */
+  const syncAll = async () => {
+    const d = {
+      animals: await JF.Store.animals.list(),
+      calving: await JF.Store.calving.list(),
+      pregnancy: await JF.Store.pregnancy.list(),
+      dryOff: await JF.Store.dryOff.list(),
+    };
+    let changes = 0;
+    for (const a of d.animals) {
+      try {
+        const { phase, group, status, value, reason } = phaseOf(a, d);
+        const patch = {};
+        if (phase && a.Category !== phase && !["Sold", "Deceased"].includes(a.CurrentStatus)) patch.Category = phase;
+        if (group && a.CurrentGroup !== group) patch.CurrentGroup = group;
+        if (status && a.CurrentStatus !== status) patch.CurrentStatus = status;
+        if (Object.keys(patch).length) {
+          patch.UpdatedAt = new Date().toISOString();
+          await JF.Store.animals.update(a.id, patch);
+          changes++;
+          console.info(`[PhaseEngine] ${a.AnimalID}: ${a.Category || "?"}/${a.CurrentStatus} → ${patch.Category || phase}${patch.CurrentStatus ? "/" + patch.CurrentStatus : ""} (${reason})`);
+        }
+        if (value != null && phase !== "Sold" && phase !== "Deceased") {
+          if (await postRevaluation(a, value, phase)) changes++;
+        }
+      } catch (e) { console.warn("[PhaseEngine]", a.AnimalID, e.message); }
+    }
+    return changes;
+  };
+
+  const init = () => {
+    // React to the entries that can change a phase — debounced into one sweep.
+    let t = null;
+    const schedule = () => { clearTimeout(t); t = setTimeout(() => syncAll().catch(() => {}), 2500); };
+    ["calving:created", "pregnancy:created", "dryOff:created", "animals:created"].forEach((evt) => JF.Cascade.on(evt, schedule));
+    setTimeout(() => syncAll().catch(() => {}), 1200); // boot pass (after LifeCycle's promotions)
+  };
+
+  return { phaseOf, syncAll, VALUES, init };
 })();
 
 </script>
@@ -4263,29 +4435,31 @@ JF.Cascade = (function () {
     // actions, future GAS sync) produces the same calf-with-parents record.
     // If the caller did not supply a CalfID, generate one (unless stillborn).
     let calfId = c.CalfID || null;
-    const stillborn = /still/i.test(String(c.CalfHealth || "") + String(c.CalvingType || ""));
-    if (!calfId && c.AnimalID && !stillborn) {
-      const year = new Date(c.Date || c.CalvingDate || Date.now()).getFullYear();
-      calfId = `CALF-${year}-${JF.Utils.uid().slice(-4)}`;
-      await JF.Store.calving.update(c.id, { CalfID: calfId });
-    }
-    if (calfId && c.AnimalID) {
-      const animals = await JF.Store.animals.list();
-      const exists = animals.find((a) => a.AnimalID === calfId || a.id === calfId);
-      if (!exists) {
-        const mother = animals.find((a) => a.AnimalID === c.AnimalID || a.id === c.AnimalID);
-        await JF.Store.animals.create({
-          id: calfId, AnimalID: calfId, Name: c.CalfName || calfId, TagNumber: null,
-          Species: mother?.Species || "Cattle", Breed: mother?.Breed || null,
-          Gender: c.CalfGender || "Female",          DateOfBirth: c.Date || c.CalvingDate,
-          Category: "Calf",
-          CurrentStatus: "Calf", MotherID: c.AnimalID,
-          FatherID: mother?.FatherID || null,
-          PhotoURL: c.PhotoURL || JF.Utils.portraitSVG(calfId, "calf"),
-          CurrentGroup: "Maternity", CurrentLocation: "Maternity Barn",
-        });
+    const stillborn = /still/i.test(String(c.CalfHealth || "") + String(c.CalvingType || ""));      if (!calfId && c.AnimalID && !stillborn) {
+        const year = new Date(c.Date || c.CalvingDate || Date.now()).getFullYear();
+        calfId = `CALF-${year}-${JF.Utils.uid().slice(-4)}`;
+        await JF.Store.calving.update(c.id, { CalfID: calfId });
       }
-    }
+      if (calfId && c.AnimalID) {
+        const animals = await JF.Store.animals.list();
+        const exists = animals.find((a) => a.AnimalID === calfId || a.id === calfId);
+        if (!exists) {
+          const mother = animals.find((a) => a.AnimalID === c.AnimalID || a.id === c.AnimalID);
+          await JF.Store.animals.create({
+            id: calfId, AnimalID: calfId, Name: c.CalfName || calfId, TagNumber: null,
+            Species: mother?.Species || "Cattle", Breed: mother?.Breed || null,
+            Gender: c.CalfGender || "Female",          DateOfBirth: c.Date || c.CalvingDate,
+            Category: "Calf",
+            CurrentStatus: "Calf", MotherID: c.AnimalID,
+            // Pedigree: the sire recorded on the calving entry wins (farm bull ID
+            // or a custom name); fall back to the mother's own recorded sire.
+            FatherID: c.SireID || mother?.FatherID || null,
+            SireName: c.SireID ? null : (c.SireName || mother?.SireName || null),
+            PhotoURL: c.PhotoURL || JF.Utils.portraitSVG(calfId, "calf"),
+            CurrentGroup: "Young Stock", CurrentLocation: mother?.CurrentLocation || "Maternity Barn",
+          });
+        }
+      }
   });
   on("death:created", async (d) => {
     if (d.AnimalID) await setAnimalStatus(d.AnimalID, "Deceased");
@@ -4926,8 +5100,21 @@ JF.RuleEngine = (function () {
     // date, so a single past entry must never complete the *next* review.
     const ageBased = trigger === "BIRTH" || trigger === "ANIMAL_CREATED";
     if (ageBased && cat === "Deworming") {
-      const need = rule.RuleID === "DW-017B" ? 2 : 1;
-      return ctx.deworming.filter((d) => d.Date).length >= need;
+      const recs = ctx.deworming.filter((d) => d.Date);
+      // Second dewormer: two doses complete it outright — or ONE dose given
+      // around the due date (±14 d), because that IS the due dose. The farmer
+      // records "a dewormer", not "dose #2", so a strict count left the
+      // reminder overdue forever after the animal was actually treated.
+      if (rule.RuleID === "DW-017B") {
+        if (recs.length >= 2) return true;
+        const dob = ctx.animal.DateOfBirth;
+        if (dob) {
+          const due = addDays(dob, Number(resolve(rule, ctx.animal.AnimalID).value) || 45);
+          return recs.some((d) => Math.abs(JF.Utils.daysBetween(due, d.Date)) <= 14);
+        }
+        return false;
+      }
+      return recs.length >= 1;
     }
     if (ageBased && cat === "Vaccination") {
       const hit = VACCINE_KEYS.find(([nameRe]) => nameRe.test(`${rule.RuleName} ${rule.Condition || ""}`));
@@ -5257,6 +5444,23 @@ JF.RuleEngine = (function () {
       } catch (e) { console.warn(`[RuleEngine] ${ruleId} ${animal.AnimalID}:`, e.message); }
     }
 
+    // Housekeeping: reminders for animals that no longer exist (deleted from
+    // the herd) are orphaned rows — the views filter by animal join, but badge
+    // counts and the reminders list keep showing them. Close them here (once
+    // per sweep: the flag lives on the shared evaluation cache).
+    if (cache.allReminders && !cache._degraded && !cache._orphansClosed) {
+      cache._orphansClosed = true;
+      const ids = new Set(animals.map((a) => a.AnimalID || a.id));
+      for (const r of cache.allReminders) {
+        if (r.AnimalID && !ids.has(r.AnimalID) && r.Status !== "Completed" && r.Status !== "Dismissed") {
+          try {
+            await JF.Store.reminders.update(r.id, { Status: "Completed", CompletedAt: today(), Notes: `${r.Notes || ""} [closed: animal no longer in the herd]`.trim() });
+            completed++;
+          } catch (e) { /* keep going */ }
+        }
+      }
+    }
+
     if (created || updated) await audit("evaluate", "Animals", animal.AnimalID, `+${created} new, ~${updated} recalculated, ${completed} completed (rules: ${loadSource})`);
     return { created, completed, updated };
   };
@@ -5497,8 +5701,15 @@ JF.RuleEngine = (function () {
         try {
           const stamp = Number(localStorage.getItem("jf_last_eval") || 0);
           if (stamp && Date.now() - stamp < 6 * 3600 * 1000) {
-            const existing = await JF.Store.reminders.list();
-            if (existing.length) skip = true;
+            const [existing, animals] = await Promise.all([JF.Store.reminders.list(), JF.Store.animals.list()]);
+            const active = animals.filter((a) => !["Sold", "Deceased"].includes(a.CurrentStatus));
+            // Skip only when every animal already has at least one reminder row.
+            // A freshly added animal (or one whose evaluation failed during an
+            // outage) would otherwise wait up to 6 h for its care plan — the
+            // "why is there no first-dewormer reminder?" bug.
+            const covered = new Set(existing.map((r) => r.AnimalID));
+            skip = existing.length > 0 && active.every((a) => covered.has(a.AnimalID || a.id));
+            if (!skip && existing.length) console.info("[JF] Some animals have no reminders yet — running a catch-up sweep.");
           }
         } catch (e) { /* storage unavailable — always evaluate */ }
       }
@@ -6387,6 +6598,35 @@ JF.QuickEntry = (function () {
 
   const dateField = (id = "qe-date") => field("Date *", id, { type: "date", value: JF.Utils.todayISO() });
 
+  /* ---------- Pick-or-type (combo) helpers ----------
+   * Parents, medicines and vaccines can be selected from what the farm already
+   * has — or typed freely as a custom name/ID. A datalist keeps one plain input
+   * doing both jobs, so custom salts and custom vaccines are first-class. */
+  const combo = (label, id, listId, options, ph = "") => JF.Utils.el("div", { class: "field" }, [
+    JF.Utils.el("label", { class: "field__label" }, label),
+    JF.Utils.el("input", { class: "input", id, list: listId, placeholder: ph || "Pick from the list or type your own" }),
+    JF.Utils.el("datalist", { id: listId }, options.map((o) => JF.Utils.el("option", { value: o.value }, o.label || ""))),
+  ]);
+
+  const resolveParent = async (raw) => {
+    const v = String(raw || "").trim();
+    if (!v) return { id: null, name: null };
+    const all = await JF.Store.animals.list();
+    const hit = all.find((a) => a.AnimalID === v || a.id === v || String(a.Name || "").trim().toLowerCase() === v.toLowerCase());
+    return hit ? { id: hit.AnimalID || hit.id, name: hit.Name || hit.AnimalID } : { id: null, name: v };
+  };
+
+  const motherOptions = async () => {
+    const all = await JF.Store.animals.list();
+    return all.filter((a) => (a.Gender || "Female") === "Female" && !["Sold", "Deceased"].includes(a.CurrentStatus))
+      .map((a) => ({ value: a.AnimalID || a.id, label: `${a.Name || ""} (${a.AnimalID || a.id})` }));
+  };
+  const fatherOptions = async () => {
+    const all = await JF.Store.animals.list();
+    return all.filter((a) => a.Gender === "Male" && !["Sold", "Deceased"].includes(a.CurrentStatus))
+      .map((a) => ({ value: a.AnimalID || a.id, label: `${a.Name || ""} (${a.AnimalID || a.id})` }));
+  };
+
   const ok = (checks) => {
     const bad = checks.filter(([v]) => !v);
     if (bad.length) { JF.Toast.show(`Missing: ${bad.map(([, n]) => n).join(", ")}`, "warning"); return false; }
@@ -6414,12 +6654,16 @@ JF.QuickEntry = (function () {
       let n = all.filter((a) => a.AnimalID?.startsWith(prefix)).length + 1;
       let id = `${prefix}-${String(n).padStart(3, "0")}`;
       while (all.some((a) => a.AnimalID === id)) { n++; id = `${prefix}-${String(n).padStart(3, "0")}`; }
+      const mother = await resolveParent($v("qe-mother"));
+      const father = await resolveParent($v("qe-father"));
       const uploaded = await JF.PhotoUpload.consume(formEl && formEl._photoField, { animalId: "", kind: "Profile" });
       await JF.Store.animals.create({
         id, AnimalID: id, Name: $v("qe-name"), TagNumber: $v("qe-tag") || null,
         Species: species, Breed: $v("qe-breed") || null, Gender: $v("qe-gender") || "Female",
         DateOfBirth: $v("qe-dob") || null, PurchaseDate: $v("qe-pdate") || null,
         PurchasePrice: num("qe-pprice") || null, CurrentStatus: "Open",
+        MotherID: mother.id || null, MotherName: mother.id ? null : (mother.name || null),
+        FatherID: father.id || null, SireName: father.id ? null : (father.name || null),
         CurrentGroup: $v("qe-group") || "Main Herd", CurrentLocation: $v("qe-loc") || "Barn A",
         PhotoURL: uploaded || JF.Utils.portraitSVG($v("qe-name") || id, species === "Buffalo" ? "buffalo" : "cattle"),
       });
@@ -6445,6 +6689,7 @@ JF.QuickEntry = (function () {
       if (!ok([[$v("qe-animal"), "Animal"]])) return null;
       await JF.Store.insemination.create({
         InseminationID: `AI-${JF.Utils.uid()}`, AnimalID: $v("qe-animal"), Date: $v("qe-date"),
+        Time: $v("qe-aitime") || null, // time-of-day drives the AI-timing coverage bands
         Method: $v("qe-method") || "Artificial Insemination", SemenBullID: $v("qe-bull") || null,
         Technician: $v("qe-tech") || null, Cost: num("qe-cost"),
       });
@@ -6468,12 +6713,16 @@ JF.QuickEntry = (function () {
       const n = animals.filter((a) => a.AnimalID?.startsWith(`CALF-${year}-`)).length + 1;
       const calfID = `CALF-${year}-${String(n).padStart(3, "0")}`;
       const calfGender = $v("qe-cgender") || "Female";
+      const sire = await resolveParent($v("qe-calfsire"));
       const mother = await JF.Store.animals.get($v("qe-animal"));
       await JF.Store.calving.create({
         CalvingID: `CALV-${JF.Utils.uid()}`, AnimalID: $v("qe-animal"), Date: $v("qe-date"),
         CalvingType: $v("qe-ctype") || "Normal", AssistanceRequired: false, Complications: "None",
         CalfID: calfID, CalfName: $v("qe-cname") || null, CalfGender: calfGender, CalfWeight: num("qe-cweight") || null,
         CalfHealth: $v("qe-chealth") || "Healthy", Veterinarian: $v("qe-vet") || null,
+        // Sire for the calf's pedigree: a farm bull ID, or a custom name/ID the
+        // farm types in (AI straws rarely carry the farm's own numbering).
+        SireID: sire.id || null, SireName: sire.id ? null : (sire.name || null),
         PhotoURL: JF.Utils.portraitSVG(`calving-${calfID}`, "calf"),
       });
       // NOTE: the calf master record (with MotherID/FatherID + care-plan reminders) is
@@ -6508,10 +6757,10 @@ JF.QuickEntry = (function () {
     },
 
     async vaccine() {
-      if (!ok([[$v("qe-animal"), "Animal"], [$v("qe-vaccine"), "Vaccine"]])) return null;
+      if (!ok([[$v("qe-vaccine"), "Vaccine"]])) return null;
       await JF.Store.vaccination.create({
         VaccinationID: `VAC-${JF.Utils.uid()}`, AnimalID: $v("qe-animal"),
-        Vaccine: $v("qe-vaccine"), DateGiven: $v("qe-date"), BatchNumber: $v("qe-batch") || null,
+        Vaccine: $v("qe-vaccine"), Salt: $v("qe-vsalt") || null, DateGiven: $v("qe-date"), BatchNumber: $v("qe-batch") || null,
         NextDueDate: $v("qe-next") || null, Veterinarian: $v("qe-vet") || null, Cost: num("qe-cost"),
       });
       return { label: "Vaccination", id: $v("qe-animal"), tab: "vaccination" };
@@ -6521,7 +6770,7 @@ JF.QuickEntry = (function () {
       if (!ok([[$v("qe-animal"), "Animal"]])) return null;
       await JF.Store.deworming.create({
         DewormingID: `DEW-${JF.Utils.uid()}`, AnimalID: $v("qe-animal"), Date: $v("qe-date"),
-        Medicine: $v("qe-med") || "Albendazole", Dose: $v("qe-dose") || null,
+        Medicine: $v("qe-med") || null, Salt: $v("qe-salt") || null, Dose: $v("qe-dose") || null,
         Weight: num("qe-weight") || null, Veterinarian: $v("qe-vet") || null, Cost: num("qe-cost"),
         NextDueDate: $v("qe-next") || null,
       });
@@ -6697,6 +6946,8 @@ JF.QuickEntry = (function () {
         field("Breed", "qe-breed", { options: ["HF Cross", "Jersey Cross", "Sahiwal", "Gir", "Red Sindhi", "Tharparkar", "Murrah Buffalo", "Nili-Ravi Buffalo", "Indigenous Cross"] }),
         field("Gender", "qe-gender", { options: ["Female", "Male"] }),
         field("Date of birth", "qe-dob", { type: "date" }),
+        await combo("Mother (pick from the farm or type a custom name)", "qe-mother", "qe-mother-list", await motherOptions()),
+        await combo("Father / Bull used (pick or type a custom name)", "qe-father", "qe-father-list", await fatherOptions()),
         field("Purchase date", "qe-pdate", { type: "date" }),
         field("Purchase price (₹)", "qe-pprice", { type: "number", ph: "e.g. 85000" }),
         field("Group", "qe-group", { options: ["Main Herd", "Maternity", "Dry Lot", "Hospital Pen", "Young Stock", "Breeding"] }),
@@ -6725,6 +6976,7 @@ JF.QuickEntry = (function () {
 
     ai: async () => JF.Utils.el("div", { class: "form-stack" }, [
       await animalSelect("qe-animal"), dateField(),
+      field("AI time", "qe-aitime", { type: "time", value: new Date().toTimeString().slice(0, 5) }),
       field("Method", "qe-method", { options: ["Artificial Insemination", "Natural Service"] }),
       field("Bull / Semen ID", "qe-bull", { ph: "e.g. BULL-001" }),
       field("Technician", "qe-tech", { ph: "e.g. Dr. Sharma" }),
@@ -6746,6 +6998,7 @@ JF.QuickEntry = (function () {
       field("Calf gender", "qe-cgender", { options: ["Female", "Male"] }),
       field("Calf weight (kg)", "qe-cweight", { type: "number", ph: "e.g. 32" }),
       field("Calf health", "qe-chealth", { options: ["Healthy", "Weak", "Needs Care"] }),
+      await combo("Father / Bull used for this calf (pick or type)", "qe-calfsire", "qe-calfsire-list", await fatherOptions()),
       field("Veterinarian", "qe-vet", { ph: "optional" }),
     ]),
 
@@ -6772,7 +7025,12 @@ JF.QuickEntry = (function () {
     vaccine: async () => {
       const w = JF.Utils.el("div", { class: "form-stack" }, [
         await animalSelect("qe-animal"), dateField(),
-        field("Vaccine *", "qe-vaccine", { options: ["FMD (Foot & Mouth Disease)", "HS (Haemorrhagic Septicaemia)", "BQ (Black Quarter)", "Anthrax", "Brucellosis", "Theileriosis"] }),
+        await combo("Vaccine * (pick a common one or type any vaccine)", "qe-vaccine", "qe-vaccine-list", [
+          { value: "FMD (Foot & Mouth Disease)" }, { value: "HS (Haemorrhagic Septicaemia)" },
+          { value: "BQ (Black Quarter)" }, { value: "Anthrax" }, { value: "Brucellosis" },
+          { value: "Theileriosis" }, { value: "Lumpy Skin Disease" }, { value: "IBR" }, { value: "BVD" },
+        ]),
+        field("Salt / active ingredient", "qe-vsalt", { ph: "e.g. OIL adjuvant, penicillin…" }),
         field("Batch number", "qe-batch", { ph: "optional" }),
         field("Next due date", "qe-next", { type: "date" }),
         field("Veterinarian", "qe-vet", { ph: "optional" }),
@@ -6783,7 +7041,11 @@ JF.QuickEntry = (function () {
 
     deworm: async () => JF.Utils.el("div", { class: "form-stack" }, [
       await animalSelect("qe-animal"), dateField(),
-      field("Medicine", "qe-med", { options: ["Albendazole", "Ivermectin", "Fenbendazole", "Oxyclozanide"] }),
+      await combo("Dewormer (pick a common one or type the brand)", "qe-med", "qe-med-list", [
+        { value: "Albendazole" }, { value: "Ivermectin" }, { value: "Fenbendazole" },
+        { value: "Oxyclozanide" }, { value: "Closantel" }, { value: "Levamisole" },
+      ]),
+      field("Salt (active ingredient)", "qe-salt", { ph: "e.g. Albendazole 3000 mg / Ivermectin 1%" }),
       field("Dose", "qe-dose", { ph: "e.g. 60 ml" }),
       field("Weight (kg)", "qe-weight", { type: "number" }),
       field("Next due date", "qe-next", { type: "date" }),
@@ -8526,21 +8788,56 @@ JF.Views.Reproduction = (function () {
       ]);
       page.appendChild(calCard);
     } else {
-      // heatRecords
-      const rows = heats.map(h => ({
-        animalId: h.AnimalID,
-        cols: [
-          `<strong>${h.HeatRecordID || "HEAT-REC"}</strong>`,
-          h.AnimalID || "—",
-          JF.Utils.formatDate(h.HeatDate, "dd MMM yyyy"),
-          h.HeatTime || "Morning",
-          h.DetectionMethod || "Visual",
-          `<span class="badge badge--warning">${h.HeatIntensity || "Strong"}</span>`,
-          h.Symptoms || "Standing Heat",
-          h.Notes || "—"
-        ]
-      }));
-      page.appendChild(renderTable(["Heat ID", "Animal ID", "Date", "Time", "Detection Method", "Intensity", "Symptoms", "Notes"], rows));
+      // heatRecords — enriched: which AI followed the heat (with its time), and
+      // the next expected heat window (heat + 18-24d cycle from parameters).
+      const animals = (await JF.Store.animals.list()) || [];
+      const nameOf = (id) => { const a = animals.find((x) => x.AnimalID === id || x.id === id); return a ? (a.Name || a.AnimalID) : (id || "—"); };
+      const aiOf = (h) => {
+        const hd = String(h.HeatDate || "");
+        if (!hd) return null;
+        return insem
+          .filter((i) => i.AnimalID === h.AnimalID && i.Date && i.Date >= hd && JF.Utils.daysBetween(hd, i.Date) <= 3)
+          .sort((a, b) => String(a.Date).localeCompare(String(b.Date)))[0] || null;
+      };
+      const cycleMin = 18, cycleAvg = 21, cycleMax = 24;
+      const nextWin = (hd) => {
+        if (!hd) return null;
+        const lo = JF.Utils.formatDate(JF.Utils.addDays(hd, cycleMin), "dd MMM");
+        const mid = JF.Utils.formatDate(JF.Utils.addDays(hd, cycleAvg), "dd MMM");
+        const hi = JF.Utils.formatDate(JF.Utils.addDays(hd, cycleMax), "dd MMM");
+        return `${lo} – ${hi} (aim ${mid})`;
+      };
+      const rows = heats.slice().sort((a, b) => String(b.HeatDate || "").localeCompare(String(a.HeatDate || ""))).map(h => {
+        const ai = aiOf(h);
+        const openDays = (() => {
+          if (!h.HeatDate) return null;
+          const d = JF.Utils.daysBetween(h.HeatDate, JF.Utils.todayISO());
+          if (ai) return null; // served — window closed
+          if (d < 0) return "upcoming";
+          return d;
+        })();
+        return {
+          animalId: h.AnimalID,
+          cols: [
+            `<strong>${nameOf(h.AnimalID)}</strong><div class="field__hint">${h.AnimalID || ""}</div>`,
+            `${JF.Utils.formatDate(h.HeatDate, "dd MMM yyyy")}<div class="field__hint">${h.HeatTime || ""}</div>`,
+            h.DetectionMethod || "Visual",
+            `<span class="badge badge--warning">${h.HeatIntensity || "Strong"}</span><div class="field__hint">${Array.isArray(h.Symptoms) ? h.Symptoms.slice(0, 2).join(", ") : (h.Symptoms || "")}</div>`,
+            ai
+              ? `<span class="badge badge--accent">💉 AI ${JF.Utils.formatDate(ai.Date, "dd MMM")}${ai.Time ? " · " + ai.Time : ""}</span>`
+              : (openDays === "upcoming"
+                  ? `<span class="badge badge--info">window opens ${nextWin(h.HeatDate).split(" – ")[0]}</span>`
+                  : openDays == null ? "—" : `<span class="badge badge--warning">not served · ${openDays}d</span>`),
+            nextWin(h.HeatDate) || "—",
+            h.Notes || "—",
+          ],
+        };
+      });
+      page.appendChild(renderTable(["Animal", "Heat observed", "Detection", "Intensity & signs", "AI after this heat", "Next expected heat", "Notes"], rows));
+      page.appendChild(JF.Utils.el("div", { class: "card", style: { padding: "var(--space-3)", marginTop: "var(--space-3)" } }, [
+        JF.Utils.el("div", { class: "field__hint" },
+          "Next-expected window uses the 18–24 day cycle (aim for day 21). An AI recorded within 3 days after the heat closes its window automatically. Record the AI time and the Heat Detective grades the timing."),
+      ]));
     }
 
     root.appendChild(page);
@@ -8891,6 +9188,165 @@ JF.Views.HeatDetective = (function () {
       page.appendChild(card);
     });
 
+    root.appendChild(page);
+  };
+
+  return { render };
+})();
+
+</script>
+  <script>
+JF.Views = JF.Views || {};
+
+/**
+ * Pedigree — search any animal and read its family tree.
+ *
+ *   ↑ Ancestors: mother & father (farm animal or custom name), grandparents
+ *     when the parents are farm animals, plus the dam's calving history.
+ *   → The animal itself: breed, DOB, phase, herd value.
+ *   ↓ Offspring: every farm animal whose MotherID/FatherID points here, with
+ *     links to keep walking the tree downward.
+ *
+ * A parent recorded as a custom name (AI straws, outside bulls) still shows —
+ * the tree is built from MotherID/MotherName/FatherID/SireName, so nothing
+ * disappears just because the sire was never registered as a farm animal.
+ */
+JF.Views.Pedigree = (function () {
+  const $ = () => document.getElementById("view-container");
+
+  const byId = (animals, id) => animals.find((a) => a.AnimalID === id || a.id === id) || null;
+
+  const card = (a, { role = "", clickable = true } = {}) => {
+    if (!a) return null;
+    const inner = [
+      JF.Utils.el("div", { style: { display: "flex", gap: "10px", alignItems: "center" } }, [
+        (a.PhotoURL && /^https?:|data:image/.test(String(a.PhotoURL)))
+          ? JF.Utils.el("img", { src: a.PhotoURL, alt: "", style: { width: "44px", height: "44px", borderRadius: "50%", objectFit: "cover" } })
+          : JF.Utils.el("div", { class: "stat-icon", style: { width: "44px", height: "44px" }, html: JF.Utils.svgIcon("animals", 22, 22) }),
+        JF.Utils.el("div", {}, [
+          JF.Utils.el("div", { style: { fontWeight: 700 } }, `${a.Name || a.AnimalID}${role ? ` · ${role}` : ""}`),
+          JF.Utils.el("div", { class: "field__hint" }, `${a.AnimalID || ""}${a.Breed ? " · " + a.Breed : ""}${a.DateOfBirth ? " · b. " + JF.Utils.formatDate(a.DateOfBirth, "dd MMM yyyy") : ""}`),
+          JF.Utils.el("div", { class: "field__hint" }, [a.Category, a.CurrentStatus].filter(Boolean).join(" · ")),
+        ]),
+      ]),
+    ].filter(Boolean);
+    const el = JF.Utils.el("div", { class: "card", style: { padding: "var(--space-3)", marginBottom: "var(--space-2)" } }, inner);
+    if (clickable) el.style.cursor = "pointer";
+    if (clickable) el.addEventListener("click", () => JF.App.navigate(`#pedigree/${a.AnimalID || a.id}`));
+    return el;
+  };
+
+  const customParent = (name, role) => JF.Utils.el("div", { class: "card", style: { padding: "var(--space-3)", marginBottom: "var(--space-2)", borderStyle: "dashed" } }, [
+    JF.Utils.el("div", { style: { fontWeight: 700 } }, `${name} · ${role}`),
+    JF.Utils.el("div", { class: "field__hint" }, "Recorded by name — not a registered farm animal (outside bull / AI straw)."),
+  ]);
+
+  const col = (title, children) => JF.Utils.el("div", {}, [
+    JF.Utils.el("div", { class: "card__eyebrow", style: { marginBottom: "var(--space-2)" } }, title),
+    ...children.filter(Boolean),
+    children.filter(Boolean).length ? null : JF.Utils.el("div", { class: "field__hint" }, "Not recorded."),
+  ]);
+
+  const render = async (path = []) => {
+    const root = $();
+    JF.Utils.clear(root);
+    const animals = (await JF.Store.animals.list()) || [];
+    const calvings = (await JF.Store.calving.list()) || [];
+    const page = JF.Utils.el("div", { class: "page" });
+
+    page.appendChild(JF.Utils.el("div", { class: "page__head-row" }, [
+      JF.Utils.el("div", {}, [
+        JF.Utils.el("div", { class: "eyebrow" }, "🐂 HERD"),
+        JF.Utils.el("h1", { class: "page__title", style: { marginTop: "8px" } }, "Pedigree"),
+        JF.Utils.el("p", { class: "page__sub", style: { marginTop: "var(--space-2)" } },
+          "Pick any animal and read its family: the bull used, the mother, grandparents and every calf she has produced. Parents can be farm animals or names recorded on the entry."),
+      ]),
+    ]));
+
+    // ---- Search / select ----
+    const q = (path[1] || "").trim();
+    const selId = JF.Utils.el("input", { class: "input", list: "pedigree-animals", placeholder: "Search by name or ID…", value: "" });
+    const hit = q ? (byId(animals, decodeURIComponent(q)) || null) : null;
+    const sel = JF.Utils.el("select", { class: "select", style: { maxWidth: "380px" }, onchange: (e) => { if (e.target.value) JF.App.navigate(`#pedigree/${e.target.value}`); } }, [
+      JF.Utils.el("option", { value: "" }, "-- Select an animal --"),
+      ...animals.map((a) => JF.Utils.el("option", { value: a.AnimalID || a.id, selected: hit && (hit.AnimalID === (a.AnimalID || a.id)) ? true : null }, `${a.Name || a.AnimalID} (${a.AnimalID || a.id})`)),
+    ]);
+    page.appendChild(JF.Utils.el("div", { class: "card", style: { padding: "var(--space-4)", display: "flex", gap: "var(--space-3)", flexWrap: "wrap", alignItems: "center" } }, [
+      JF.Utils.el("div", { class: "field", style: { margin: 0, minWidth: "260px" } }, [JF.Utils.el("label", { class: "field__label" }, "Animal"), sel]),
+    ]));
+
+    if (!hit) {
+      page.appendChild(JF.Utils.el("div", { class: "card search-empty", style: { padding: "var(--space-6)" } },
+        "Select an animal above to see its pedigree tree."));
+      root.appendChild(page);
+      return;
+    }
+
+    const id = hit.AnimalID || hit.id;
+
+    // ---- Ancestors ----
+    const mother = hit.MotherID ? byId(animals, hit.MotherID) : null;
+    const father = hit.FatherID ? byId(animals, hit.FatherID) : null;
+    const maternalGM = mother && mother.MotherID ? byId(animals, mother.MotherID) : null;
+    const maternalGF = mother && mother.FatherID ? byId(animals, mother.FatherID) : null;
+    const paternalGM = father && father.MotherID ? byId(animals, father.MotherID) : null;
+    const paternalGF = father && father.FatherID ? byId(animals, father.FatherID) : null;
+
+    // ---- Offspring (calves pointing at this animal) + calvings as mother ----
+    const offspring = animals.filter((a) => a.MotherID === id || a.FatherID === id);
+    const asMother = calvings.filter((c) => c.AnimalID === id).sort((x, y) => String(y.Date || "").localeCompare(String(x.Date || "")));
+
+    const ancestorsCol = col("PARENTS & GRANDPARENTS", [
+      mother ? card(mother, { role: "Mother (dam)" }) : (hit.MotherName ? customParent(hit.MotherName, "mother (name only)") : null),
+      father ? card(father, { role: "Father (sire)" }) : (hit.SireName ? customParent(hit.SireName, "sire (name only)") : null),
+      maternalGM ? card(maternalGM, { role: "Maternal grandmother" }) : null,
+      maternalGF ? card(maternalGF, { role: "Maternal grandfather" }) : null,
+      paternalGM ? card(paternalGM, { role: "Paternal grandmother" }) : null,
+      paternalGF ? card(paternalGF, { role: "Paternal grandfather" }) : null,
+    ]);
+
+    const offspringCol = col("OFFSPRING (FARM RECORDS)", offspring.map((o) =>
+      card(o, { role: o.MotherID === id ? "out of " + (hit.Name || id) : "sired by " + (hit.Name || id) })));
+
+    const selfCard = JF.Utils.el("div", { class: "card card--feature", style: { padding: "var(--space-4)", marginBottom: "var(--space-3)" } }, [
+      JF.Utils.el("div", { style: { display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap" } }, [
+        (hit.PhotoURL && /^https?:|data:image/.test(String(hit.PhotoURL)))
+          ? JF.Utils.el("img", { src: hit.PhotoURL, alt: "", style: { width: "64px", height: "64px", borderRadius: "12px", objectFit: "cover" } })
+          : JF.Utils.el("div", { class: "stat-icon", style: { width: "64px", height: "64px" }, html: JF.Utils.svgIcon("animals", 30, 30) }),
+        JF.Utils.el("div", {}, [
+          JF.Utils.el("h3", { class: "section__title", style: { margin: 0 } }, `${hit.Name || id}`),
+          JF.Utils.el("div", { class: "field__hint" }, `${hit.AnimalID || id} · ${hit.Breed || "breed not set"} · ${hit.Gender || "Female"} · b. ${hit.DateOfBirth ? JF.Utils.formatDate(hit.DateOfBirth, "dd MMM yyyy") : "unknown"}`),
+          JF.Utils.el("div", { style: { marginTop: "6px", display: "flex", gap: "6px", flexWrap: "wrap" } }, [
+            hit.Category ? JF.Utils.el("span", { class: "badge badge--info" }, hit.Category) : null,
+            hit.CurrentStatus ? JF.Utils.el("span", { class: "badge badge--neutral" }, hit.CurrentStatus) : null,
+            hit.MotherID ? JF.Utils.el("a", { class: "badge badge--neutral", href: `#animal/${hit.MotherID}` }, `dam: ${mother?.Name || hit.MotherID}`) : (hit.MotherName ? JF.Utils.el("span", { class: "badge badge--neutral" }, `dam: ${hit.MotherName} (name)`) : null),
+            hit.FatherID ? JF.Utils.el("a", { class: "badge badge--neutral", href: `#pedigree/${hit.FatherID}` }, `sire: ${father?.Name || hit.FatherID}`) : (hit.SireName ? JF.Utils.el("span", { class: "badge badge--neutral" }, `sire: ${hit.SireName} (name)`) : null),
+          ].filter(Boolean)),
+        ]),
+        JF.Utils.el("div", { style: { marginLeft: "auto" } }, [
+          JF.Utils.el("a", { class: "btn btn--ghost btn--sm", href: `#animal/${id}` }, "Open full profile →"),
+        ]),
+      ]),
+    ]);
+
+    // Calving history of this animal as a mother (links calf → pedigree).
+    const historyCol = col("CALVING HISTORY", asMother.map((c) => JF.Utils.el("div", { class: "card", style: { padding: "var(--space-3)", marginBottom: "var(--space-2)" } }, [
+      JF.Utils.el("div", { style: { fontWeight: 700 } }, `${c.CalfName || c.CalfID || "Calf"} · ${c.CalfGender || "?"}`),
+      JF.Utils.el("div", { class: "field__hint" }, `${JF.Utils.formatDate(c.Date || c.CalvingDate, "dd MMM yyyy")} · ${c.CalvingType || "Normal"}${c.SireID || c.SireName ? ` · sire: ${c.SireName || c.SireID}` : ""}`),
+      c.CalfID ? JF.Utils.el("div", { style: { marginTop: "6px" } }, [
+        animals.some((a) => (a.AnimalID || a.id) === c.CalfID)
+          ? JF.Utils.el("a", { class: "btn btn--ghost btn--sm", href: `#pedigree/${c.CalfID}` }, "View calf's pedigree →")
+          : JF.Utils.el("span", { class: "field__hint" }, "calf not registered as a farm animal"),
+      ]) : null,
+    ])));
+
+    const grid = JF.Utils.el("div", { class: "grid grid--cols-2", style: { alignItems: "start" } }, [
+      JF.Utils.el("div", {}, [selfCard, ancestorsCol, historyCol]),
+      JF.Utils.el("div", {}, [offspringCol]),
+    ]);
+    page.appendChild(grid);
+
+    // A hidden datalist powers free-text search later (kept simple: dropdown above).
     root.appendChild(page);
   };
 
@@ -11803,6 +12259,7 @@ JF.App = (function () {
       subs: ["heat","calendar","insemination","pregnancy","calving","reports"],
       render: (p) => JF.Views.Reproduction.render(p) },
     { id: "detective",  title: "Heat Detective", icon: "search",  group: "Herd", render: (p) => JF.Views.HeatDetective.render(p) },
+    { id: "pedigree",   title: "Pedigree",    icon: "animals",  group: "Herd", render: (p) => JF.Views.Pedigree.render(p) },
     { id: "health",     title: "Health",     icon: "health",    group: "Herd",
       subs: ["records","treatments","vaccination","deworming","diseases","reports"],
       render: (p) => JF.Views.Health.render(p) },
@@ -12000,6 +12457,7 @@ JF.App = (function () {
     // Age-based calf care plan (auto deworming/vaccination reminders)
     try { JF.CareSchedule.init(); } catch (e) { console.warn("CareSchedule init failed:", e); }
     try { JF.LifeCycle.init(); } catch (e) { console.warn("LifeCycle init failed:", e); }
+    try { JF.PhaseEngine.init(); } catch (e) { console.warn("PhaseEngine init failed:", e); }
 
     // Router registration (the first render happens further down, after the
     // sidebar is built — it must exist before the view paints).
@@ -12086,36 +12544,9 @@ JF.App = (function () {
       JF.Store.on("seeded", () => updateBadgeCounts());
     } catch (e) {}
 
-    // First boot against an empty MongoDB: seed one dummy animal + heat entry so
-    // the database, API round trip and rule engine are proven end to end. Runs
-    // only when the farm has no animals at all, in the background so a slow
-    // first connection never blocks the dashboard.
-    (async () => {
-      try {
-        const animals = await JF.Store.animals.list();
-        if (!animals.length) {
-          const dummy = await JF.Store.animals.create({
-            AnimalID: "COW-0001",
-            Name: "Lakshmi",
-            Gender: "Female",
-            Category: "Cow",
-            Breed: "HF Cross",
-            DateOfBirth: "2022-03-10",
-            CurrentStatus: "Lactating",
-            Notes: "First entry — connection test (safe to edit or delete).",
-          });
-          await JF.Store.heat.create({
-            HeatID: "HT-0001",
-            AnimalID: dummy.AnimalID || dummy.id,
-            HeatDate: JF.Utils.todayISO(),
-            ObservationMethod: "Visual",
-            Notes: "Seeded heat entry for the connection test.",
-          });
-          console.info("[JF] MongoDB was empty — seeded dummy animal COW-0001 + heat entry.");
-          route(); // re-render with the seeded animal visible
-        }
-      } catch (e) { console.warn("Dummy seed skipped:", e?.message || e); }
-    })();
+    // NOTE: the old "seed one dummy animal (Lakshmi) + heat on an empty MongoDB"
+    // block was removed on the farm's request — a real farm starts with a clean
+    // database and enters its own animals.
 
     // Wire quick-entry button fallback if not already
     console.info("%c🐄 Jagt Farm — Cattle Management System",

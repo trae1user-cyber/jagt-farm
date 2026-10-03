@@ -40,6 +40,35 @@ JF.QuickEntry = (function () {
 
   const dateField = (id = "qe-date") => field("Date *", id, { type: "date", value: JF.Utils.todayISO() });
 
+  /* ---------- Pick-or-type (combo) helpers ----------
+   * Parents, medicines and vaccines can be selected from what the farm already
+   * has — or typed freely as a custom name/ID. A datalist keeps one plain input
+   * doing both jobs, so custom salts and custom vaccines are first-class. */
+  const combo = (label, id, listId, options, ph = "") => JF.Utils.el("div", { class: "field" }, [
+    JF.Utils.el("label", { class: "field__label" }, label),
+    JF.Utils.el("input", { class: "input", id, list: listId, placeholder: ph || "Pick from the list or type your own" }),
+    JF.Utils.el("datalist", { id: listId }, options.map((o) => JF.Utils.el("option", { value: o.value }, o.label || ""))),
+  ]);
+
+  const resolveParent = async (raw) => {
+    const v = String(raw || "").trim();
+    if (!v) return { id: null, name: null };
+    const all = await JF.Store.animals.list();
+    const hit = all.find((a) => a.AnimalID === v || a.id === v || String(a.Name || "").trim().toLowerCase() === v.toLowerCase());
+    return hit ? { id: hit.AnimalID || hit.id, name: hit.Name || hit.AnimalID } : { id: null, name: v };
+  };
+
+  const motherOptions = async () => {
+    const all = await JF.Store.animals.list();
+    return all.filter((a) => (a.Gender || "Female") === "Female" && !["Sold", "Deceased"].includes(a.CurrentStatus))
+      .map((a) => ({ value: a.AnimalID || a.id, label: `${a.Name || ""} (${a.AnimalID || a.id})` }));
+  };
+  const fatherOptions = async () => {
+    const all = await JF.Store.animals.list();
+    return all.filter((a) => a.Gender === "Male" && !["Sold", "Deceased"].includes(a.CurrentStatus))
+      .map((a) => ({ value: a.AnimalID || a.id, label: `${a.Name || ""} (${a.AnimalID || a.id})` }));
+  };
+
   const ok = (checks) => {
     const bad = checks.filter(([v]) => !v);
     if (bad.length) { JF.Toast.show(`Missing: ${bad.map(([, n]) => n).join(", ")}`, "warning"); return false; }
@@ -67,12 +96,16 @@ JF.QuickEntry = (function () {
       let n = all.filter((a) => a.AnimalID?.startsWith(prefix)).length + 1;
       let id = `${prefix}-${String(n).padStart(3, "0")}`;
       while (all.some((a) => a.AnimalID === id)) { n++; id = `${prefix}-${String(n).padStart(3, "0")}`; }
+      const mother = await resolveParent($v("qe-mother"));
+      const father = await resolveParent($v("qe-father"));
       const uploaded = await JF.PhotoUpload.consume(formEl && formEl._photoField, { animalId: "", kind: "Profile" });
       await JF.Store.animals.create({
         id, AnimalID: id, Name: $v("qe-name"), TagNumber: $v("qe-tag") || null,
         Species: species, Breed: $v("qe-breed") || null, Gender: $v("qe-gender") || "Female",
         DateOfBirth: $v("qe-dob") || null, PurchaseDate: $v("qe-pdate") || null,
         PurchasePrice: num("qe-pprice") || null, CurrentStatus: "Open",
+        MotherID: mother.id || null, MotherName: mother.id ? null : (mother.name || null),
+        FatherID: father.id || null, SireName: father.id ? null : (father.name || null),
         CurrentGroup: $v("qe-group") || "Main Herd", CurrentLocation: $v("qe-loc") || "Barn A",
         PhotoURL: uploaded || JF.Utils.portraitSVG($v("qe-name") || id, species === "Buffalo" ? "buffalo" : "cattle"),
       });
@@ -98,6 +131,7 @@ JF.QuickEntry = (function () {
       if (!ok([[$v("qe-animal"), "Animal"]])) return null;
       await JF.Store.insemination.create({
         InseminationID: `AI-${JF.Utils.uid()}`, AnimalID: $v("qe-animal"), Date: $v("qe-date"),
+        Time: $v("qe-aitime") || null, // time-of-day drives the AI-timing coverage bands
         Method: $v("qe-method") || "Artificial Insemination", SemenBullID: $v("qe-bull") || null,
         Technician: $v("qe-tech") || null, Cost: num("qe-cost"),
       });
@@ -121,12 +155,16 @@ JF.QuickEntry = (function () {
       const n = animals.filter((a) => a.AnimalID?.startsWith(`CALF-${year}-`)).length + 1;
       const calfID = `CALF-${year}-${String(n).padStart(3, "0")}`;
       const calfGender = $v("qe-cgender") || "Female";
+      const sire = await resolveParent($v("qe-calfsire"));
       const mother = await JF.Store.animals.get($v("qe-animal"));
       await JF.Store.calving.create({
         CalvingID: `CALV-${JF.Utils.uid()}`, AnimalID: $v("qe-animal"), Date: $v("qe-date"),
         CalvingType: $v("qe-ctype") || "Normal", AssistanceRequired: false, Complications: "None",
         CalfID: calfID, CalfName: $v("qe-cname") || null, CalfGender: calfGender, CalfWeight: num("qe-cweight") || null,
         CalfHealth: $v("qe-chealth") || "Healthy", Veterinarian: $v("qe-vet") || null,
+        // Sire for the calf's pedigree: a farm bull ID, or a custom name/ID the
+        // farm types in (AI straws rarely carry the farm's own numbering).
+        SireID: sire.id || null, SireName: sire.id ? null : (sire.name || null),
         PhotoURL: JF.Utils.portraitSVG(`calving-${calfID}`, "calf"),
       });
       // NOTE: the calf master record (with MotherID/FatherID + care-plan reminders) is
@@ -161,10 +199,10 @@ JF.QuickEntry = (function () {
     },
 
     async vaccine() {
-      if (!ok([[$v("qe-animal"), "Animal"], [$v("qe-vaccine"), "Vaccine"]])) return null;
+      if (!ok([[$v("qe-vaccine"), "Vaccine"]])) return null;
       await JF.Store.vaccination.create({
         VaccinationID: `VAC-${JF.Utils.uid()}`, AnimalID: $v("qe-animal"),
-        Vaccine: $v("qe-vaccine"), DateGiven: $v("qe-date"), BatchNumber: $v("qe-batch") || null,
+        Vaccine: $v("qe-vaccine"), Salt: $v("qe-vsalt") || null, DateGiven: $v("qe-date"), BatchNumber: $v("qe-batch") || null,
         NextDueDate: $v("qe-next") || null, Veterinarian: $v("qe-vet") || null, Cost: num("qe-cost"),
       });
       return { label: "Vaccination", id: $v("qe-animal"), tab: "vaccination" };
@@ -174,7 +212,7 @@ JF.QuickEntry = (function () {
       if (!ok([[$v("qe-animal"), "Animal"]])) return null;
       await JF.Store.deworming.create({
         DewormingID: `DEW-${JF.Utils.uid()}`, AnimalID: $v("qe-animal"), Date: $v("qe-date"),
-        Medicine: $v("qe-med") || "Albendazole", Dose: $v("qe-dose") || null,
+        Medicine: $v("qe-med") || null, Salt: $v("qe-salt") || null, Dose: $v("qe-dose") || null,
         Weight: num("qe-weight") || null, Veterinarian: $v("qe-vet") || null, Cost: num("qe-cost"),
         NextDueDate: $v("qe-next") || null,
       });
@@ -350,6 +388,8 @@ JF.QuickEntry = (function () {
         field("Breed", "qe-breed", { options: ["HF Cross", "Jersey Cross", "Sahiwal", "Gir", "Red Sindhi", "Tharparkar", "Murrah Buffalo", "Nili-Ravi Buffalo", "Indigenous Cross"] }),
         field("Gender", "qe-gender", { options: ["Female", "Male"] }),
         field("Date of birth", "qe-dob", { type: "date" }),
+        await combo("Mother (pick from the farm or type a custom name)", "qe-mother", "qe-mother-list", await motherOptions()),
+        await combo("Father / Bull used (pick or type a custom name)", "qe-father", "qe-father-list", await fatherOptions()),
         field("Purchase date", "qe-pdate", { type: "date" }),
         field("Purchase price (₹)", "qe-pprice", { type: "number", ph: "e.g. 85000" }),
         field("Group", "qe-group", { options: ["Main Herd", "Maternity", "Dry Lot", "Hospital Pen", "Young Stock", "Breeding"] }),
@@ -378,6 +418,7 @@ JF.QuickEntry = (function () {
 
     ai: async () => JF.Utils.el("div", { class: "form-stack" }, [
       await animalSelect("qe-animal"), dateField(),
+      field("AI time", "qe-aitime", { type: "time", value: new Date().toTimeString().slice(0, 5) }),
       field("Method", "qe-method", { options: ["Artificial Insemination", "Natural Service"] }),
       field("Bull / Semen ID", "qe-bull", { ph: "e.g. BULL-001" }),
       field("Technician", "qe-tech", { ph: "e.g. Dr. Sharma" }),
@@ -399,6 +440,7 @@ JF.QuickEntry = (function () {
       field("Calf gender", "qe-cgender", { options: ["Female", "Male"] }),
       field("Calf weight (kg)", "qe-cweight", { type: "number", ph: "e.g. 32" }),
       field("Calf health", "qe-chealth", { options: ["Healthy", "Weak", "Needs Care"] }),
+      await combo("Father / Bull used for this calf (pick or type)", "qe-calfsire", "qe-calfsire-list", await fatherOptions()),
       field("Veterinarian", "qe-vet", { ph: "optional" }),
     ]),
 
@@ -425,7 +467,12 @@ JF.QuickEntry = (function () {
     vaccine: async () => {
       const w = JF.Utils.el("div", { class: "form-stack" }, [
         await animalSelect("qe-animal"), dateField(),
-        field("Vaccine *", "qe-vaccine", { options: ["FMD (Foot & Mouth Disease)", "HS (Haemorrhagic Septicaemia)", "BQ (Black Quarter)", "Anthrax", "Brucellosis", "Theileriosis"] }),
+        await combo("Vaccine * (pick a common one or type any vaccine)", "qe-vaccine", "qe-vaccine-list", [
+          { value: "FMD (Foot & Mouth Disease)" }, { value: "HS (Haemorrhagic Septicaemia)" },
+          { value: "BQ (Black Quarter)" }, { value: "Anthrax" }, { value: "Brucellosis" },
+          { value: "Theileriosis" }, { value: "Lumpy Skin Disease" }, { value: "IBR" }, { value: "BVD" },
+        ]),
+        field("Salt / active ingredient", "qe-vsalt", { ph: "e.g. OIL adjuvant, penicillin…" }),
         field("Batch number", "qe-batch", { ph: "optional" }),
         field("Next due date", "qe-next", { type: "date" }),
         field("Veterinarian", "qe-vet", { ph: "optional" }),
@@ -436,7 +483,11 @@ JF.QuickEntry = (function () {
 
     deworm: async () => JF.Utils.el("div", { class: "form-stack" }, [
       await animalSelect("qe-animal"), dateField(),
-      field("Medicine", "qe-med", { options: ["Albendazole", "Ivermectin", "Fenbendazole", "Oxyclozanide"] }),
+      await combo("Dewormer (pick a common one or type the brand)", "qe-med", "qe-med-list", [
+        { value: "Albendazole" }, { value: "Ivermectin" }, { value: "Fenbendazole" },
+        { value: "Oxyclozanide" }, { value: "Closantel" }, { value: "Levamisole" },
+      ]),
+      field("Salt (active ingredient)", "qe-salt", { ph: "e.g. Albendazole 3000 mg / Ivermectin 1%" }),
       field("Dose", "qe-dose", { ph: "e.g. 60 ml" }),
       field("Weight (kg)", "qe-weight", { type: "number" }),
       field("Next due date", "qe-next", { type: "date" }),

@@ -9,6 +9,7 @@ JF.App = (function () {
       subs: ["heat","calendar","insemination","pregnancy","calving","reports"],
       render: (p) => JF.Views.Reproduction.render(p) },
     { id: "detective",  title: "Heat Detective", icon: "search",  group: "Herd", render: (p) => JF.Views.HeatDetective.render(p) },
+    { id: "pedigree",   title: "Pedigree",    icon: "animals",  group: "Herd", render: (p) => JF.Views.Pedigree.render(p) },
     { id: "health",     title: "Health",     icon: "health",    group: "Herd",
       subs: ["records","treatments","vaccination","deworming","diseases","reports"],
       render: (p) => JF.Views.Health.render(p) },
@@ -206,6 +207,7 @@ JF.App = (function () {
     // Age-based calf care plan (auto deworming/vaccination reminders)
     try { JF.CareSchedule.init(); } catch (e) { console.warn("CareSchedule init failed:", e); }
     try { JF.LifeCycle.init(); } catch (e) { console.warn("LifeCycle init failed:", e); }
+    try { JF.PhaseEngine.init(); } catch (e) { console.warn("PhaseEngine init failed:", e); }
 
     // Router registration (the first render happens further down, after the
     // sidebar is built — it must exist before the view paints).
@@ -292,36 +294,9 @@ JF.App = (function () {
       JF.Store.on("seeded", () => updateBadgeCounts());
     } catch (e) {}
 
-    // First boot against an empty MongoDB: seed one dummy animal + heat entry so
-    // the database, API round trip and rule engine are proven end to end. Runs
-    // only when the farm has no animals at all, in the background so a slow
-    // first connection never blocks the dashboard.
-    (async () => {
-      try {
-        const animals = await JF.Store.animals.list();
-        if (!animals.length) {
-          const dummy = await JF.Store.animals.create({
-            AnimalID: "COW-0001",
-            Name: "Lakshmi",
-            Gender: "Female",
-            Category: "Cow",
-            Breed: "HF Cross",
-            DateOfBirth: "2022-03-10",
-            CurrentStatus: "Lactating",
-            Notes: "First entry — connection test (safe to edit or delete).",
-          });
-          await JF.Store.heat.create({
-            HeatID: "HT-0001",
-            AnimalID: dummy.AnimalID || dummy.id,
-            HeatDate: JF.Utils.todayISO(),
-            ObservationMethod: "Visual",
-            Notes: "Seeded heat entry for the connection test.",
-          });
-          console.info("[JF] MongoDB was empty — seeded dummy animal COW-0001 + heat entry.");
-          route(); // re-render with the seeded animal visible
-        }
-      } catch (e) { console.warn("Dummy seed skipped:", e?.message || e); }
-    })();
+    // NOTE: the old "seed one dummy animal (Lakshmi) + heat on an empty MongoDB"
+    // block was removed on the farm's request — a real farm starts with a clean
+    // database and enters its own animals.
 
     // Wire quick-entry button fallback if not already
     console.info("%c🐄 Jagt Farm — Cattle Management System",

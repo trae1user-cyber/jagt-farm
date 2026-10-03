@@ -101,29 +101,31 @@ JF.Cascade = (function () {
     // actions, future GAS sync) produces the same calf-with-parents record.
     // If the caller did not supply a CalfID, generate one (unless stillborn).
     let calfId = c.CalfID || null;
-    const stillborn = /still/i.test(String(c.CalfHealth || "") + String(c.CalvingType || ""));
-    if (!calfId && c.AnimalID && !stillborn) {
-      const year = new Date(c.Date || c.CalvingDate || Date.now()).getFullYear();
-      calfId = `CALF-${year}-${JF.Utils.uid().slice(-4)}`;
-      await JF.Store.calving.update(c.id, { CalfID: calfId });
-    }
-    if (calfId && c.AnimalID) {
-      const animals = await JF.Store.animals.list();
-      const exists = animals.find((a) => a.AnimalID === calfId || a.id === calfId);
-      if (!exists) {
-        const mother = animals.find((a) => a.AnimalID === c.AnimalID || a.id === c.AnimalID);
-        await JF.Store.animals.create({
-          id: calfId, AnimalID: calfId, Name: c.CalfName || calfId, TagNumber: null,
-          Species: mother?.Species || "Cattle", Breed: mother?.Breed || null,
-          Gender: c.CalfGender || "Female",          DateOfBirth: c.Date || c.CalvingDate,
-          Category: "Calf",
-          CurrentStatus: "Calf", MotherID: c.AnimalID,
-          FatherID: mother?.FatherID || null,
-          PhotoURL: c.PhotoURL || JF.Utils.portraitSVG(calfId, "calf"),
-          CurrentGroup: "Maternity", CurrentLocation: "Maternity Barn",
-        });
+    const stillborn = /still/i.test(String(c.CalfHealth || "") + String(c.CalvingType || ""));      if (!calfId && c.AnimalID && !stillborn) {
+        const year = new Date(c.Date || c.CalvingDate || Date.now()).getFullYear();
+        calfId = `CALF-${year}-${JF.Utils.uid().slice(-4)}`;
+        await JF.Store.calving.update(c.id, { CalfID: calfId });
       }
-    }
+      if (calfId && c.AnimalID) {
+        const animals = await JF.Store.animals.list();
+        const exists = animals.find((a) => a.AnimalID === calfId || a.id === calfId);
+        if (!exists) {
+          const mother = animals.find((a) => a.AnimalID === c.AnimalID || a.id === c.AnimalID);
+          await JF.Store.animals.create({
+            id: calfId, AnimalID: calfId, Name: c.CalfName || calfId, TagNumber: null,
+            Species: mother?.Species || "Cattle", Breed: mother?.Breed || null,
+            Gender: c.CalfGender || "Female",          DateOfBirth: c.Date || c.CalvingDate,
+            Category: "Calf",
+            CurrentStatus: "Calf", MotherID: c.AnimalID,
+            // Pedigree: the sire recorded on the calving entry wins (farm bull ID
+            // or a custom name); fall back to the mother's own recorded sire.
+            FatherID: c.SireID || mother?.FatherID || null,
+            SireName: c.SireID ? null : (c.SireName || mother?.SireName || null),
+            PhotoURL: c.PhotoURL || JF.Utils.portraitSVG(calfId, "calf"),
+            CurrentGroup: "Young Stock", CurrentLocation: mother?.CurrentLocation || "Maternity Barn",
+          });
+        }
+      }
   });
   on("death:created", async (d) => {
     if (d.AnimalID) await setAnimalStatus(d.AnimalID, "Deceased");
