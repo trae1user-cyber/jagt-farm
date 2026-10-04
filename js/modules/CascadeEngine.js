@@ -151,157 +151,128 @@ JF.Cascade = (function () {
     if (d.id && !d.NextDueDate) {
       try { await JF.Store.deworming.update(d.id, { NextDueDate: JF.Utils.formatDate(next, "yyyy-MM-dd") }); } catch (e) {}
     }
-    if (d.Cost) fire("accounting:autoCreate", { kind: "deworming", record: d });
-  });
-
-  on("vaccination:created", async (v) => {
-    if (v.Cost) fire("accounting:autoCreate", { kind: "vaccination", record: v });
-  });
-
-  on("health:created", async (h) => {
-    if (h.TreatmentCost) fire("accounting:autoCreate", { kind: "health", record: h });
   });
 
   // (3) ACCOUNTING double-entry journal creation.
-  // Every department that spends or earns money posts here, so Finance and the
-  // Dashboard head always agree with the operational entry that caused it.
-  const mapping = {
-    health:       { dr: "Veterinary Expense",  cr: "Cash" },
-    deworming:    { dr: "Deworming Expense",   cr: "Cash" },
-    vaccination:  { dr: "Vaccination Expense", cr: "Cash" },
-    // Reproduction: an AI costs money the moment it is recorded (AI-018).
-    insemination: { dr: "Veterinary Expense",  cr: "Cash" },
-    ai:           { dr: "Veterinary Expense",  cr: "Cash" },
-    purchases:    { dr: "Livestock",           cr: "Cash" },
-    sales:        { dr: "Cash",                cr: "Cattle Sales" },
+  // Every department that spends or earns money posts through post() below, so
+  // the Finance view and the Dashboard head always agree with the operational
+  // entry that caused it.
+  //
+  // The cash/bank side follows the payment method everywhere (UPI/Card/Cheque →
+  // Bank), so the Cash Book only moves when cash actually moved.
+  const payAccountOf = (method) => ({ "Bank Transfer": "Bank", Cheque: "Bank", UPI: "Bank", Card: "Bank" }[method] || "Cash");
+
+  const EXPENSE_ACCOUNT = {
+    Veterinary: "Veterinary Expense", Medicine: "Medicine Expense",
+    Vaccination: "Vaccination Expense", Deworming: "Deworming Expense",
+    Labor: "Labor Expense", Electricity: "Electricity Expense", Water: "Water Expense",
+    Fuel: "Fuel Expense", Transportation: "Transportation Expense",
+    Maintenance: "Maintenance Expense", Equipment: "Equipment Expense",
+    "Cattle Purchase": "Livestock", "Raw Material Purchase": "Other Farm Expense",
+    "Other Farm Expense": "Other Farm Expense",
   };
 
-  // The cash/bank side follows the payment method everywhere (UPI/Card/UPI → Bank), so
-  // the Cash Book only moves when cash actually moved.
-  const payAccountOf = (method) => ({ "Bank Transfer": "Bank", Cheque: "Bank", UPI: "Bank", Card: "Bank", Cash: "Cash" }[method] || "Cash");
+  // THE one place a source record becomes a journal entry: which accounts, which
+  // amount, what it is called. Everything else just says which kind it is.
+  const LEDGER = {
+    milk:         { type: "milk-sale",   dr: (r) => payAccountOf(r.PaymentMethod), cr: () => "Milk Sales",        amt: (r) => r.Amount },
+    purchases:    { type: "purchases",   dr: () => "Livestock",                    cr: (r) => payAccountOf(r.PaymentMethod), amt: (r) => r.TotalCost ?? r.PurchasePrice ?? r.Amount },
+    sales:        { type: "sales",       dr: (r) => payAccountOf(r.PaymentMethod), cr: () => "Cattle Sales",      amt: (r) => r.NetSale ?? r.SalePrice ?? r.Amount },
+    expenses:     { type: "expense",     dr: (r) => EXPENSE_ACCOUNT[r.Category] || "Other Farm Expense", cr: (r) => payAccountOf(r.PaymentMethod), amt: (r) => r.Amount },
+    health:       { type: "health",      dr: () => "Veterinary Expense",           amt: (r) => r.TreatmentCost },
+    deworming:    { type: "deworming",   dr: () => "Deworming Expense",            amt: (r) => r.Cost },
+    vaccination:  { type: "vaccination", dr: () => "Vaccination Expense",          amt: (r) => r.Cost },
+    // Reproduction: an AI costs money the moment it is recorded (AI-018).
+    insemination: { type: "insemination", dr: () => "Veterinary Expense",          amt: (r) => r.Cost },
+  };
+
+  const describe = (kind, r) =>
+    kind === "milk"
+      ? `Milk sale${r.Shift ? " · " + r.Shift : ""}${r.QuantityLitres ? " · " + r.QuantityLitres + "L" : ""}${r.Buyer ? " · " + r.Buyer : ""}`
+      : kind === "expenses"
+        ? (r.Description || `${r.Category || "Farm"} expense`)
+        : `${kind} for ${r.AnimalName || r.AnimalID || ""}`.trim();
+
+  const posting = new Set();
 
   /**
-   * Post one journal row for a cost-bearing entry. Idempotent per source record:
-   * if a row for this record already exists (a re-run, a sync, a duplicate
-   * event) it is updated instead of doubled, so Finance can never drift.
+   * Book one source record into the ledger, exactly once.
+   *
+   * The reference is derived from the record id (JE-<kind>-<record id>), so the
+   * same event arriving twice — a re-fired cascade, an edit, a sync, a backfill —
+   * finds its own row and corrects it instead of adding a mirror. Rows written
+   * before the key existed are recognised by their old bare-record-id reference
+   * too, so no farmer row is ever duplicated or orphaned.
    */
-  const postCost = async (kind, record, amount, description) => {
-    if (!record) return false;
-    const m = mapping[kind];
-    const amt = Number(amount || 0);
-    if (!m || !(amt > 0)) return false;
-    const journal = await JF.Store.journal.list();
-    const dupe = journal.find((j) => j.ReferenceID && String(j.ReferenceID) === String(record.id) && j.TransactionType === kind);
-    if (dupe) {
-      if (Number(dupe.Amount) !== amt) {
-        await JF.Store.journal.update(dupe.id, { Amount: amt, Date: record.Date || record.DateGiven || dupe.Date, Description: description || dupe.Description });
+  const post = async (kind, record) => {
+    const spec = LEDGER[kind];
+    if (!spec || !record || !record.id) return false;
+    const amt = Math.round(Number(spec.amt(record) || 0));
+    if (!(amt > 0)) return false;
+    const key = `JE-${kind}-${record.id}`;
+    if (posting.has(key)) return false; // same record already in flight
+    posting.add(key);
+    try {
+      const journal = await JF.Store.journal.list();
+      const dupe = journal.find((j) => String(j.ReferenceID) === key ||
+        (String(j.ReferenceID) === String(record.id) && j.TransactionType === spec.type));
+      const date = record.Date || record.DateGiven || JF.Utils.todayISO();
+      if (dupe) {
+        if (Number(dupe.Amount) !== amt || String(dupe.Date || "") !== String(date)) {
+          await JF.Store.journal.update(dupe.id, { Amount: amt, Date: date });
+        }
+        return false;
       }
-      return false;
+      await makeJournal({
+        JournalID: `JNL-${JF.Utils.uid("j")}`,
+        Date: date,
+        ReferenceID: key,
+        TransactionType: spec.type,
+        Description: describe(kind, record),
+        DebitAccount: spec.dr(record),
+        CreditAccount: spec.cr ? spec.cr(record) : payAccountOf(record.PaymentMethod),
+        Amount: amt,
+        AnimalID: record.AnimalID || null,
+        AnimalName: record.AnimalName || null,
+        PaymentMethod: record.PaymentMethod || "Cash",
+      });
+      return true;
+    } finally {
+      posting.delete(key);
     }
-    await makeJournal({
-      JournalID: `JNL-${JF.Utils.uid("j")}`,
-      Date: record.Date || record.DateGiven || JF.Utils.todayISO(),
-      ReferenceID: record.id,
-      TransactionType: kind,
-      Description: description || `${kind} for ${record.AnimalName || record.AnimalID || ""}`,
-      DebitAccount: m.dr,
-      CreditAccount: payAccountOf(record.PaymentMethod) || m.cr,
-      Amount: amt,
-      AnimalID: record.AnimalID || null,
-      AnimalName: record.AnimalName || null,
-      PaymentMethod: record.PaymentMethod || "Cash",
-    });
-    return true;
   };
 
-  // Reproduction → Finance: insemination cost (AI-018). Fires for the modern
-  // "insemination" entity and the legacy "ai" collection alike, and on edit so
-  // correcting the price moves Finance with it.
-  on("insemination:created", async (ai) => { if (Number(ai?.Cost)) await postCost("insemination", ai, ai.Cost); });
-  on("insemination:updated", async (ai) => { if (ai && Number(ai.Cost)) await postCost("insemination", ai, ai.Cost); });
-
-  // Corrections: if a cost is edited on an existing entry, keep the journal row
-  // in step instead of leaving the old amount behind.
-  on("health:updated", async (h) => { if (h && Number(h.TreatmentCost)) await postCost("health", h, h.TreatmentCost); });
-  on("deworming:updated", async (d) => { if (d && Number(d.Cost)) await postCost("deworming", d, d.Cost); });
-  on("vaccination:updated", async (v) => { if (v && Number(v.Cost)) await postCost("vaccination", v, v.Cost); });
-
-  on("accounting:autoCreate", async ({ kind, record }) => {
-    const m = mapping[kind];
-    if (!m || !record) return;
-    const amt = Number(record.TreatmentCost ?? record.Cost ?? record.TotalCost ?? record.NetSale ?? record.Amount ?? 0);
-    if (!amt) return;
-    await makeJournal({
-      JournalID: `JNL-${JF.Utils.uid("j")}`,
-      Date: record.Date || JF.Utils.todayISO(),
-      ReferenceID: record.id,
-      TransactionType: kind,
-      Description: `${kind} for ${record.AnimalID || ""}`,
-      DebitAccount: m.dr,
-      CreditAccount: m.cr,
-      Amount: amt,
-      AnimalID: record.AnimalID || null,
-      PaymentMethod: record.PaymentMethod || "Cash",
-    });
+  // Money in and money out, at the moment the record is created — and on edit,
+  // so a corrected amount corrects the ledger rather than adding a second row.
+  [["milkSales", "milk"], ["purchases", "purchases"], ["sales", "sales"], ["expenses", "expenses"],
+   ["health", "health"], ["deworming", "deworming"], ["vaccination", "vaccination"], ["insemination", "insemination"],
+  ].forEach(([entity, kind]) => {
+    on(`${entity}:created`, (record) => post(kind, record));
+    on(`${entity}:updated`, (record) => post(kind, record));
   });
 
-  // Milk payment received: the dairy's core income. Dr Cash/Bank · Cr Milk Sales.
-  on("milkSales:created", async (m) => {
-    const amt = Number(m.Amount || 0);
-    if (!amt) return;
-    const payAccount = { "Bank Transfer": "Bank", Cheque: "Bank", UPI: "Bank", Card: "Bank", Cash: "Cash" };
-    await makeJournal({
-      JournalID: `JNL-${JF.Utils.uid("j")}`,
-      Date: m.Date || JF.Utils.todayISO(),
-      ReferenceID: m.id,
-      TransactionType: "milk-sale",
-      Description: `Milk sale${m.Shift ? " · " + m.Shift : ""}${m.QuantityLitres ? " · " + m.QuantityLitres + "L" : ""}${m.Buyer ? " · " + m.Buyer : ""}`,
-      DebitAccount: payAccount[m.PaymentMethod] || "Cash",
-      CreditAccount: "Milk Sales",
-      Amount: amt,
-      PaymentMethod: m.PaymentMethod || "Cash",
-    });
-  });
+  /**
+   * Bring the ledger up to date with records that were made before this posting
+   * path existed (the seeded milk, purchases and sales never fired a cascade).
+   * post() is idempotent, so this sweep converges: it books what is missing and
+   * leaves every existing row alone. Returns how many it booked.
+   */
+  const syncLedger = async () => {
+    const seen = new Set((await JF.Store.journal.list()).map((j) => String(j.ReferenceID)));
+    let booked = 0;
+    for (const [entity, kind] of [["milkSales", "milk"], ["purchases", "purchases"], ["sales", "sales"], ["expenses", "expenses"]]) {
+      const list = await JF.Store[entity].list().catch(() => []);
+      for (const record of list) {
+        if (!record?.id || seen.has(`JE-${kind}-${record.id}`)) continue;
+        if (await post(kind, record)) { seen.add(`JE-${kind}-${record.id}`); booked++; }
+      }
+    }
+    return booked;
+  };
 
-  on("expenses:created", async (e) => {
-    if (!e || !Number(e.Amount)) return;
-    const categoryMap = {
-      Veterinary: "Veterinary Expense",
-      Medicine: "Medicine Expense",
-      Vaccination: "Vaccination Expense",
-      Deworming: "Deworming Expense",
-      Labor: "Labor Expense",
-      Electricity: "Electricity Expense",
-      Water: "Water Expense",
-      Fuel: "Fuel Expense",
-      Transportation: "Transportation Expense",
-      Maintenance: "Maintenance Expense",
-      Equipment: "Equipment Expense",
-      "Cattle Purchase": "Livestock",
-      "Raw Material Purchase": "Other Farm Expense",
-      "Other Farm Expense": "Other Farm Expense",
-    };
-    const payAccount = { "Bank Transfer": "Bank", Cheque: "Bank", UPI: "Bank", Card: "Bank", Cash: "Cash" };
-    await makeJournal({
-      JournalID: `JNL-${JF.Utils.uid("j")}`,
-      Date: e.Date || JF.Utils.todayISO(),
-      ReferenceID: e.id,
-      TransactionType: "expense",
-      Description: e.Description || `${e.Category || "Farm"} expense`,
-      DebitAccount: categoryMap[e.Category] || "Other Farm Expense",
-      CreditAccount: payAccount[e.PaymentMethod] || "Cash",
-      Amount: Number(e.Amount),
-      AnimalID: e.AnimalID || null,
-      PaymentMethod: e.PaymentMethod || "Cash",
-    });
-  });
-
-  on("purchases:created", async (p) => fire("accounting:autoCreate", { kind: "purchases", record: { ...p, TreatmentCost: p.TotalCost } }));
-  on("sales:created", async (s) => fire("accounting:autoCreate", { kind: "sales", record: { ...s, TreatmentCost: s.NetSale || s.SalePrice } }));
-
-  const init = () => { /* listeners already wired */ };
+  const init = () => { /* listeners already wired; syncLedger runs from app boot */ };
   const suspend = () => { suspended = true; };
   const resume = () => { suspended = false; };
   const isSuspended = () => suspended;
-  return { publish, subscribe, on, init, fire, makeJournal, suspend, resume, isSuspended };
+  return { publish, subscribe, on, init, fire, post, syncLedger, makeJournal, suspend, resume, isSuspended };
 })();

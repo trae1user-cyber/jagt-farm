@@ -209,6 +209,12 @@ JF.App = (function () {
     // Init cascade listeners
     try { JF.Cascade.init(); } catch (e) { console.warn(e); }
 
+    // Book anything that earned or spent money before its record existed in the
+    // ledger (idempotent, so this is a converging sweep, not a second posting).
+    JF.Cascade.syncLedger()
+      .then((booked) => { if (booked) console.info(`[JF] Ledger: booked ${booked} earlier entr${booked === 1 ? "y" : "ies"}.`); })
+      .catch((e) => console.warn("Ledger sync failed:", e));
+
     try { JF.LifeCycle.init(); } catch (e) { console.warn("LifeCycle init failed:", e); }
     try { JF.PhaseEngine.init(); } catch (e) { console.warn("PhaseEngine init failed:", e); }
 
