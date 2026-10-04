@@ -98,7 +98,7 @@ JF.Cascade = (function () {
     let calfId = c.CalfID || null;
     const stillborn = /still/i.test(String(c.CalfHealth || "") + String(c.CalvingType || ""));      if (!calfId && c.AnimalID && !stillborn) {
         const year = new Date(c.Date || c.CalvingDate || Date.now()).getFullYear();
-        calfId = `CALF-${year}-${JF.Utils.uid().slice(-4)}`;
+        calfId = await JF.Utils.nextAnimalId(`CALF-${year}`);
         await JF.Store.calving.update(c.id, { CalfID: calfId });
       }
       if (calfId && c.AnimalID) {

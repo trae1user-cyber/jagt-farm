@@ -105,10 +105,7 @@ JF.QuickEntry = (function () {
       if (!ok([[$v("qe-name"), "Name"]])) return null;
       const species = $v("qe-species") || "Cattle";
       const prefix = species === "Buffalo" ? "BUFF" : ($v("qe-gender") === "Male" ? "BULL" : "COW");
-      const all = await JF.Store.animals.list();
-      let n = all.filter((a) => a.AnimalID?.startsWith(prefix)).length + 1;
-      let id = `${prefix}-${String(n).padStart(3, "0")}`;
-      while (all.some((a) => a.AnimalID === id)) { n++; id = `${prefix}-${String(n).padStart(3, "0")}`; }
+      const id = await JF.Utils.nextAnimalId(prefix);
       const mother = await resolveParent($v("qe-mother"));
       const father = await resolveParent($v("qe-father"));
       const uploaded = await JF.PhotoUpload.consume(formEl && formEl._photoField, { animalId: "", kind: "Profile" });
@@ -169,10 +166,8 @@ JF.QuickEntry = (function () {
 
     async calving() {
       if (!ok([[$v("qe-animal"), "Mother"]])) return null;
-      const animals = await JF.Store.animals.list();
       const year = new Date($v("qe-date")).getFullYear();
-      const n = animals.filter((a) => a.AnimalID?.startsWith(`CALF-${year}-`)).length + 1;
-      const calfID = `CALF-${year}-${String(n).padStart(3, "0")}`;
+      const calfID = await JF.Utils.nextAnimalId(`CALF-${year}`);
       const calfGender = $v("qe-cgender") || "Female";
       const sire = await resolveParent($v("qe-calfsire"));
       // The mother may be clicked from the herd list or typed as a name/id —
@@ -299,10 +294,7 @@ JF.QuickEntry = (function () {
       if (!positive([[num("qe-price"), "Price"]])) return null;
       const species = $v("qe-species") || "Cattle";
       const prefix = species === "Buffalo" ? "BUFF" : ($v("qe-gender") === "Male" ? "BULL" : "COW");
-      const all = await JF.Store.animals.list();
-      let n = all.filter((a) => a.AnimalID?.startsWith(prefix)).length + 1;
-      let id = `${prefix}-${String(n).padStart(3, "0")}`;
-      while (all.some((a) => a.AnimalID === id)) { n++; id = `${prefix}-${String(n).padStart(3, "0")}`; }
+      const id = await JF.Utils.nextAnimalId(prefix);
       const total = num("qe-price") + num("qe-transport") + num("qe-vetcheck");
       await JF.Store.animals.create({
         id, AnimalID: id, Name: $v("qe-name") || id, Species: species,

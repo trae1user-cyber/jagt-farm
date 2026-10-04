@@ -14,6 +14,30 @@ JF.Utils = (function () {
     return `${prefix}${String(n).padStart(pad, "0")}`;
   };
 
+  /**
+   * The one place an animal tag is issued. Quick Entry, the blank canvas and
+   * every department form call this, so they cannot disagree.
+   *
+   * The number comes from the highest tag EVER issued, not from how many
+   * animals exist. Counting existing animals handed a newcomer the tag of a
+   * deleted animal, and every record still naming that tag silently re-attached
+   * to the newcomer. The high-water mark is stored, so a farm with holes
+   * (COW-001..014 with 006 gone) skips past them and never lands on one.
+   */
+  const nextAnimalId = async (prefix) => {
+    const animals = (await JF.Store.animals.list()) || [];
+    const used = animals.filter((a) => String(a.AnimalID || "").startsWith(`${prefix}-`))
+      .map((a) => Number(String(a.AnimalID).split("-").pop()) || 0);
+    const key = `animal_seq_${prefix}`;
+    let issued = 0;
+    try { issued = Number((await JF.Store.settings.get(key))?.value || 0); } catch (e) { /* offline: fall back to what exists */ }
+    let n = Math.max(issued, ...used) + 1;
+    let id = `${prefix}-${String(n).padStart(3, "0")}`;
+    while (animals.some((a) => a.AnimalID === id)) { n++; id = `${prefix}-${String(n).padStart(3, "0")}`; }
+    try { await JF.Store.settings.set(key, n); } catch (e) { console.warn("[Utils.nextAnimalId] could not record the sequence:", e.message); }
+    return id;
+  };
+
   const money = (n, symbol = "₹") => {
     if (n === null || n === undefined) return `${symbol}0`;
     const v = Number(n);
@@ -264,6 +288,6 @@ JF.Utils = (function () {
   return {
     uid, uidSeq, money, formatDate, parseDate, isDate, addDays, daysBetween, today, todayISO,
     norm, anyId, aliasesOf, sameAnimal, recordBelongsTo, findAnimal, dateKey, byDateDesc, latestDate,
-    ageInYears, ageLabel, el, clear, debounce, svgIcon, photoURL, portraitSVG,
+    ageInYears, ageLabel, el, clear, debounce, svgIcon, photoURL, portraitSVG, nextAnimalId,
   };
 })();
