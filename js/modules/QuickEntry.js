@@ -727,6 +727,14 @@ JF.QuickEntry = (function () {
     type: "success",
     action: res.id ? { label: "Go to record", href: recordUrl(res), onClick: () => { JF.Modal.close?.(); JF.App.navigate(recordUrl(res)); } } : null,
   });
+
+  /** Why a save failed, in the farmer's words. An older server is the usual cause. */
+  const failureText = (e) => /unknown entity/i.test(e?.message || "")
+    ? "The farm API does not accept this record yet - it is running an older build."
+    : "Failed to save record.";
+
+  /** Shown while a form builds (it reads the herd for its animal pickers). */
+  const loadingForm = () => JF.Utils.el("div", { class: "search-empty" }, "Loading fields…");
   const openPicker = () => {
     const grid = JF.Utils.el("div", { style: { display: "grid", gridTemplateColumns: "repeat(3, minmax(0,1fr))", gap: "var(--space-3)" } });
     OPTIONS.forEach((o) => {
@@ -744,6 +752,7 @@ JF.QuickEntry = (function () {
   };
 
   const openForm = async (id) => {
+    JF.Modal.open({ title: OPTIONS.find((o) => o.id === id)?.label || id, size: "md", body: loadingForm(), footer: [] });
     const body = await buildForm(id);
     const saveBtn = JF.Utils.el("button", { type: "button", class: "btn btn--primary" }, "Save Record");
     saveBtn.addEventListener("click", async () => {
@@ -759,7 +768,7 @@ JF.QuickEntry = (function () {
         JF.Modal.close();
       } catch (e) {
         console.error(e);
-        JF.Toast.show("Failed to save record.", "danger");
+        JF.Toast.show(failureText(e), "danger");
         saveBtn.disabled = false; saveBtn.textContent = "Save Record";
       }
     });
@@ -787,5 +796,5 @@ JF.QuickEntry = (function () {
     if (chip) { chip.checked = true; chip.dispatchEvent(new Event("change", { bubbles: true })); }
   };
 
-  return { init, openPicker, openForm, openObserve, buildForm, saveForm, OPTIONS };
+  return { init, openPicker, openForm, openObserve, buildForm, saveForm, failureText, loadingForm, OPTIONS };
 })();

@@ -52,8 +52,14 @@ JF.Views.Canvas = (function () {
       ]),
     ]));
 
+    const card = JF.Utils.el("div", { class: "card", style: { padding: "var(--space-5)", maxWidth: "720px" } }, JF.QuickEntry.loadingForm());
+    page.appendChild(card);
+    $().appendChild(page);
+    // The form reads the herd to fill its animal pickers, so show something
+    // while it builds rather than an empty page.
     const body = await JF.QuickEntry.buildForm(id);
-    page.appendChild(JF.Utils.el("div", { class: "card", style: { padding: "var(--space-5)", maxWidth: "720px" } }, body));
+    JF.Utils.clear(card);
+    card.appendChild(body);
 
     const save = JF.Utils.el("button", { type: "button", class: "btn btn--primary" }, "Save Record");
     save.addEventListener("click", async () => {
@@ -68,7 +74,7 @@ JF.Views.Canvas = (function () {
         blank(); // back to empty, ready for the next record
       } catch (e) {
         console.error(e);
-        JF.Toast.show("Failed to save record.", "danger");
+        JF.Toast.show(JF.QuickEntry.failureText(e), "danger");
         save.disabled = false; save.textContent = "Save Record";
       }
     });
