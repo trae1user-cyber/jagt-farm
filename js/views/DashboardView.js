@@ -247,7 +247,7 @@ JF.Views.Dashboard = (function () {
 
     // --- Herd Composition (donut + legend)
     const herdCard = el("div", { class: "card" });
-    herdCard.appendChild(cardHead("dashboard", "Herd Composition", "Details", () => JF.App.navigate("#animals/groups")));
+    herdCard.appendChild(cardHead("dashboard", "Herd Composition", "Details", () => JF.App.navigate("#animals/all")));
     const donutWrap = el("div", { style: "display:flex;align-items:center;gap:18px;padding:6px 16px 16px;flex-wrap:wrap" });
     const segs = [
       { n: cats.lactating, color: "#2f7a46" },

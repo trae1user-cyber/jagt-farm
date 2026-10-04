@@ -173,8 +173,7 @@ JF.Store = (function () {
       },
       async allMap() { const all = await adapter.list("settings"); return Object.fromEntries(all.map((s) => [s.key, s.value])); },
     },
-    groups: wrapEntity("groups"),
-  };
+    };
 
   // Auto-initialize from localStorage preference. Default is the MongoDB farm
   // API (endpoint+token are baked into MongoApiAdapter), falling back to the

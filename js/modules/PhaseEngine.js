@@ -9,10 +9,10 @@ window.JF = window.JF || {};
  *   Preg Heifer : never calved + latest pregnancy check Positive (or expected
  *                 calving in the future confirmed by records)
  *   Cow         : has calved (lactating when inside a lactation, Dry after a
- *                 dry-off, Open/Pregnant between cycles) — grouped "Milking Herd"
+ *                 dry-off, Open/Pregnant between cycles)
  *   The animal master's CurrentStatus keeps the classic values the rest of the
  *   app already speaks (Calf/Heifer/Pregnant/Lactating/Dry/Open/...); Category
- *   and CurrentGroup follow the phase so lists and groups agree.
+ *   follows the phase so lists and filters agree.
  *
  * ASSET VALUES (the farm's fixed schedule, written to the journal automatically):
  *   calf / young stock ₹40,000 · pregnant heifer ₹70,000 · lactating or dry cow ₹1,50,000
@@ -43,7 +43,7 @@ JF.PhaseEngine = (function () {
   const phaseOf = (a, d) => {
     const id = a.AnimalID || a.id;
     const female = (a.Gender || "Female") === "Female";
-    if (["Sold", "Deceased"].includes(a.CurrentStatus)) return { phase: a.CurrentStatus, group: a.CurrentGroup, value: null, reason: "left the herd" };
+    if (["Sold", "Deceased"].includes(a.CurrentStatus)) return { phase: a.CurrentStatus, value: null, reason: "left the herd" };
 
     // Records may point at this animal by AnimalID, by name the farmer typed, or
     // by tag — match on any alias so a calving logged against "dabbi" still
@@ -67,7 +67,7 @@ JF.PhaseEngine = (function () {
 
     if (!female) {
       const phase = parity > 0 || (ageDays != null && ageDays > 365) ? "Bull" : "Calf";
-      return { phase, group: phase === "Bull" ? "Breeding" : "Young Stock", value: phaseValue(phase), reason: "male line" };
+      return { phase, value: phaseValue(phase), reason: "male line" };
     }
     if (parity > 0) {
       // Cow: dry only when a dry-off happened after the last calving.
@@ -75,18 +75,18 @@ JF.PhaseEngine = (function () {
       const lastDry = dryOffs[dryOffs.length - 1] || null;
       const dry = lastDry && (!lastCalving || lastDry > lastCalving);
       const phase = "Cow";
-      return { phase, group: "Milking Herd", status: dry ? "Dry" : "Lactating", value: phaseValue(phase), reason: `${parity} calving(s)` };
+      return { phase, status: dry ? "Dry" : "Lactating", value: phaseValue(phase), reason: `${parity} calving(s)` };
     }
     if (pregnant) {
-      return { phase: "Preg Heifer", group: "Breeding", status: "Pregnant", value: phaseValue("Preg Heifer"), reason: `positive check ${lastPositive}, no calving yet` };
+      return { phase: "Preg Heifer", status: "Pregnant", value: phaseValue("Preg Heifer"), reason: `positive check ${lastPositive}, no calving yet` };
     }
     if (ageDays == null) {
       // No DOB: trust the stored status if it is a phase word, else classify as heifer.
       const guess = ["Calf", "Heifer"].includes(a.CurrentStatus) ? a.CurrentStatus : "Heifer";
-      return { phase: guess, group: guess === "Calf" ? "Young Stock" : "Breeding", value: phaseValue(guess), reason: "no DOB — kept current phase" };
+      return { phase: guess, value: phaseValue(guess), reason: "no DOB — kept current phase" };
     }
     const phase = ageDays < 180 ? "Calf" : "Heifer";
-    return { phase, group: ageDays < 180 ? "Young Stock" : "Breeding", status: ageDays < 180 ? "Calf" : "Open", value: phaseValue(phase), reason: `${ageDays}d old` };
+    return { phase, status: ageDays < 180 ? "Calf" : "Open", value: phaseValue(phase), reason: `${ageDays}d old` };
   };
 
   /**
@@ -186,10 +186,10 @@ JF.PhaseEngine = (function () {
     let changes = await linkRelationships(d);
     for (const a of d.animals) {
       try {
-        const { phase, group, status, value, reason } = phaseOf(a, d);
+        const { phase, status, value, reason } = phaseOf(a, d);
         const patch = {};
         if (phase && a.Category !== phase && !["Sold", "Deceased"].includes(a.CurrentStatus)) patch.Category = phase;
-        if (group && a.CurrentGroup !== group) patch.CurrentGroup = group;
+        
         if (status && a.CurrentStatus !== status) patch.CurrentStatus = status;
         // The asset value is derived, so it is written from here and from nowhere
         // else — it follows the animal through a calving without anyone typing it.

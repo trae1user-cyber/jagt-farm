@@ -29,7 +29,7 @@ JF.Data.MongoApiAdapter = (function () {
   // Entities that an older server deployment (API v1.0.x) does not recognise.
   // While the capability probe reports an old server, these are served as
   // empty lists WITHOUT a request — no 400s in the console, no lag.
-  const NEWER_ENTITIES = new Set(["death", "groups", "reminderState"]);
+  const NEWER_ENTITIES = new Set(["death", "reminderState"]);
 
   // The old server names some collections differently. When it reports
   // "Unknown entity", the call is retried ONCE against the legacy name and the

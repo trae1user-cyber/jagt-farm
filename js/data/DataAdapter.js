@@ -4,7 +4,7 @@ JF.Data.DataAdapter = (function () {
   const entities = [
     "animals","heat","insemination","pregnancy","calving",
     "health","deworming","vaccination","death","purchases","sales",
-    "milkSales","expenses","journal","reminders","files","dryOff","rules","ruleParameters","ruleOverrides","audit","settings","groups"
+    "milkSales","expenses","journal","reminders","files","dryOff","rules","ruleParameters","ruleOverrides","audit","settings"
   ];
 
   class Interface {

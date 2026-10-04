@@ -32,7 +32,7 @@ JF.Views.AnimalProfile = (function () {
           JF.Utils.el("span", { class: "chip" }, a?.Breed || ""),
           JF.Utils.el("span", { class: "chip" }, a?.Gender || ""),
           JF.Utils.el("span", { class: "chip" }, a?.DateOfBirth ? `${JF.Utils.ageLabel(a.DateOfBirth)} old` : ""),
-          JF.Utils.el("span", { class: "chip" }, a?.CurrentGroup || a?.CurrentLocation || ""),
+          JF.Utils.el("span", { class: "chip" }, a?.CurrentLocation || ""),
           JF.Utils.el("span", { html: statusBadge(a?.CurrentStatus) }),
         ]),
       ]),
@@ -181,7 +181,7 @@ JF.Views.AnimalProfile = (function () {
         JF.Utils.el("div", { class: "card__eyebrow" }, "BASIC INFO"),
         info("Tag Number", a?.TagNumber), info("Species", a?.Species), info("Color", a?.Color),
         info("Date of Birth", JF.Utils.formatDate(a?.DateOfBirth)), info("Age", a?.DateOfBirth ? JF.Utils.ageLabel(a.DateOfBirth) : ""),
-        info("Location", a?.CurrentLocation), info("Group", a?.CurrentGroup),
+        info("Location", a?.CurrentLocation),
       ]),
       JF.Utils.el("div", { class: "card" }, [
         JF.Utils.el("div", { class: "card__eyebrow" }, "PEDIGREE & PURCHASE"),
@@ -524,7 +524,7 @@ JF.Views.AnimalProfile = (function () {
       ["TagNumber", "Tag Number", "text"], ["Name", "Name", "text"], ["Breed", "Breed", "text"],
       ["DateOfBirth", "Date of Birth", "date"], ["PurchaseDate", "Purchase Date", "date"],
       ["PurchasePrice", "Purchase Price", "number"], ["Color", "Color", "text"],
-      ["IdentificationMarks", "Identification Marks", "text"], ["CurrentGroup", "Group", "text"],
+      ["IdentificationMarks", "Identification Marks", "text"],
       ["CurrentLocation", "Location", "text"], ["Notes", "Notes", "text"],
     ];
     const wrap = JF.Utils.el("div", { class: "form-stack" });

@@ -40,7 +40,7 @@ const ENTITIES = new Set([
   "dryOff", "death", "health", "vaccination", "deworming", "treatment", "milk",
   "milkSales", "expenses", "income", "sales", "purchases", "assets", "journal",
   "reminders", "reminderState", "rules", "ruleParameters", "ruleOverrides", "settings", "files",
-  "audit", "groups",
+  "audit",
 ]);
 
 const client = new MongoClient(MONGO_URI, { appName: "jagt" });

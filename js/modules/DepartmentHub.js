@@ -28,7 +28,6 @@ JF.Departments = (function () {
     journal: ["finance", "animal", "dashboard", "analytics", "reports"],
     reminders: ["reminders", "animal", "dashboard", "calendar"],
     files: ["documents", "animal"],
-    groups: ["animals", "dashboard"],
   };
 
   const dirty = new Set();

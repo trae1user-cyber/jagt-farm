@@ -33,9 +33,9 @@ JF.Views.Reports = (function () {
   R("complete-register", "animal", "Complete Animal Register", async () => {
     const { animals } = await build();
     return {
-      headers: ["Animal ID", "Name", "Species", "Breed", "Gender", "DOB", "Age", "Status", "Group", "Location"],
-      rows: animals.map((a) => [a.AnimalID, a.Name, a.Species, a.Breed, a.Gender, fmt(a.DateOfBirth), JF.Utils.ageLabel(a.DateOfBirth), a.CurrentStatus, a.CurrentGroup || "—", a.CurrentLocation || "—"]),
-      footers: [`${animals.length} animals`, "", "", "", "", "", "", "", "", ""],
+      headers: ["Animal ID", "Name", "Species", "Breed", "Gender", "DOB", "Age", "Status", "Location"],
+      rows: animals.map((a) => [a.AnimalID, a.Name, a.Species, a.Breed, a.Gender, fmt(a.DateOfBirth), JF.Utils.ageLabel(a.DateOfBirth), a.CurrentStatus, a.CurrentLocation || "—"]),
+      footers: [`${animals.length} animals`, "", "", "", "", "", "", "", ""],
     };
   });
   R("active-herd", "animal", "Active Herd", async () => {

@@ -119,7 +119,7 @@ JF.QuickEntry = (function () {
         PurchasePrice: num("qe-pprice") || null, CurrentStatus: "Open",
         MotherID: mother.id || null, MotherName: mother.id ? null : (mother.name || null),
         FatherID: father.id || null, SireName: father.id ? null : (father.name || null),
-        CurrentGroup: $v("qe-group") || "Main Herd", CurrentLocation: $v("qe-loc") || "Barn A",
+        CurrentLocation: $v("qe-loc") || "Barn A",
         PhotoURL: uploaded || JF.Utils.portraitSVG($v("qe-name") || id, species === "Buffalo" ? "buffalo" : "cattle"),
       });
       if (uploaded) {
@@ -422,7 +422,7 @@ JF.QuickEntry = (function () {
         await combo("Father / Bull used (pick or type a custom name)", "qe-father", "qe-father-list", await fatherOptions()),
         field("Purchase date", "qe-pdate", { type: "date" }),
         field("Purchase price (₹)", "qe-pprice", { type: "number", ph: "e.g. 85000" }),
-        field("Group", "qe-group", { options: ["Main Herd", "Maternity", "Dry Lot", "Hospital Pen", "Young Stock", "Breeding"] }),
+        
         field("Location", "qe-loc", { options: ["Barn A", "Barn B", "Barn C", "Grazing Field 3", "Hospital", "Maternity Barn"] }),
       ]);
       wrap._photoField = photo;

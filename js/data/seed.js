@@ -42,7 +42,6 @@ JF.Seed = (function () {
         PurchaseDate: i > 6 ? iso(JF.Utils.addDays(dob, 30 + Math.floor(Math.random()*100))) : null,
         PurchasePrice: i > 6 ? 60000 + Math.floor(Math.random()*80000) : null,
         CurrentStatus: stat,
-        CurrentGroup: pick(["Main Herd","Hospital Pen","Dry Lot","Maternity","Young Stock",null]),
         CurrentLocation: pick(["Barn A","Barn B","Grazing Field 3","Hospital","Maternity Barn"]),
         PhotoURL: cowPhoto,
         Notes: i % 5 === 0 ? "High performer" : "",
@@ -60,7 +59,7 @@ JF.Seed = (function () {
         CurrentStatus: pick(["Lactating","Pregnant","Open"]),
         MotherID: null, FatherID: null, PurchaseDate: daysAgo(700+i*20),
         PurchasePrice: 100000 + i*15000, PhotoURL: photoPrompt("murrah buffalo cow portrait in rural indian farm afternoon light"),
-        CurrentGroup: "Main Herd", CurrentLocation: "Barn A",
+        CurrentLocation: "Barn A",
       });
     }
     // Bulls
@@ -72,7 +71,7 @@ JF.Seed = (function () {
         DateOfBirth: daysAgo(365*4 + i*60), CurrentStatus: "Lactating".replace("Lactating","Active"),
         MotherID: null, FatherID: null, PurchaseDate: daysAgo(900+i*10),
         PurchasePrice: 120000 + i*35000, PhotoURL: photoPrompt(`pedigree bull ${bullNames[i-1]} in a stud farm, editorial portrait`),
-        CurrentGroup: "Breeding", CurrentLocation: "Barn C",
+        CurrentLocation: "Barn C",
       });
     }
     // Calves - CALF-2026-001 DOB must match its calving record CALV-001 (5 days ago)
@@ -85,7 +84,7 @@ JF.Seed = (function () {
         DateOfBirth: dob, CurrentStatus: "Calf",
         MotherID: `COW-${String(i + 3).padStart(3,"0")}`, FatherID: `BULL-${String(((i-1) % 4) + 1).padStart(3,"0")}`,
         PhotoURL: photoPrompt("newborn calf portrait in straw covered maternity pen, warm sunlight, professional"),
-        CurrentGroup: "Maternity", CurrentLocation: "Maternity Barn",
+        CurrentLocation: "Maternity Barn",
       });
     }
     return cows;
@@ -443,7 +442,6 @@ JF.Seed = (function () {
   };
 
   const files = [];
-  const groups = [];
   const generateFiles = () => {
     const doc = (id, name, cat, animal, recType, recId, notes) => files.push({
       id, FileID: id, FileName: name, Category: cat, AnimalID: animal,
@@ -516,7 +514,7 @@ JF.Seed = (function () {
       ["deworming", dewormings], ["vaccination", vaccinations],
       ["death", deaths], ["purchases", purchases], ["sales", sales],
       ["milkSales", milk], ["expenses", expenses], ["journal", journal], ["reminders", reminders],
-      ["files", files], ["groups", groups], ["settings", settings],
+      ["files", files], ["settings", settings],
     ];
     for (const [entity, list] of writes) {
       for (const r of list) {

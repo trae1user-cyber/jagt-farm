@@ -2,7 +2,7 @@ JF.App = (function () {
   const ROUTES = [
     { id: "dashboard",  title: "Dashboard",  icon: "dashboard", group: "Home",  render: () => JF.Views.Dashboard.render() },
     { id: "animals",    title: "Animals",    icon: "animals",   group: "Herd",
-      subs: ["all","add","groups","calves","pregnant","open","heat","dry","sick","sold","deceased"],
+      subs: ["all","add","calves","pregnant","open","heat","dry","sick","sold","deceased"],
       render: (p) => JF.Views.Animals.render(p) },
     { id: "animal",     title: "Animal",     icon: "animals",   group: "Herd", hidden: true, render: (p) => JF.Views.AnimalProfile.render(p) },
     { id: "reproduction",title:"Reproduction",icon:"heart",     group: "Herd",

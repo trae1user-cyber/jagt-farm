@@ -121,7 +121,7 @@ JF.Cascade = (function () {
             FatherID: c.SireID || mother?.FatherID || null,
             SireName: c.SireID ? null : (c.SireName || mother?.SireName || null),
             PhotoURL: c.PhotoURL || JF.Utils.portraitSVG(calfId, "calf"),
-            CurrentGroup: "Young Stock", CurrentLocation: mother?.CurrentLocation || "Maternity Barn",
+            CurrentLocation: mother?.CurrentLocation || "Maternity Barn",
           });
         }
       }
