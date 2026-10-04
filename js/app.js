@@ -23,6 +23,7 @@ JF.App = (function () {
       subs: ["animal","veterinary","purchase","sale","invoices","certificates","other"],
       render: (p) => JF.Views.Documents.render(p) },
     { id: "calendar",   title: "Calendar",   icon: "calendar",  group: "Operations", render: () => JF.Views.Calendar.render() },
+    { id: "canvas",     title: "Blank Entry", icon: "plus",      group: "Operations", render: () => JF.Views.Canvas.render() },
     { id: "reminders",  title: "Reminders",  icon: "bell",      group: "Operations", render: () => JF.Views.Reminders.render() },
     { id: "rules",      title: "Rules",      icon: "analytics", group: "Operations",
       subs: ["overview","rules","parameters","overrides","quality"],

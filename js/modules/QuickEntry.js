@@ -716,6 +716,17 @@ JF.QuickEntry = (function () {
   ]);
 
   /* ---------- Picker + form shell ---------- */
+
+  // The canvas screen renders these same two things instead of opening a modal,
+  // so a field added to a form here is on the canvas with no second edit.
+  const buildForm = async (id) => (FORMS[id] || (async () => JF.Utils.el("div", {}, "Form unavailable.")))();
+  const saveForm = async (id, formEl) => (SAVE[id] || (async () => null))(formEl);
+
+  const recordUrl = (res) => res.tab ? `#animal/${res.id}/${res.tab}` : (String(res.id).startsWith("C") ? `#animal/${res.id}` : "#reminders");
+  const announce = (res) => JF.Toast.show(`${res.label} saved successfully!`, {
+    type: "success",
+    action: res.id ? { label: "Go to record", href: recordUrl(res), onClick: () => { JF.Modal.close?.(); JF.App.navigate(recordUrl(res)); } } : null,
+  });
   const openPicker = () => {
     const grid = JF.Utils.el("div", { style: { display: "grid", gridTemplateColumns: "repeat(3, minmax(0,1fr))", gap: "var(--space-3)" } });
     OPTIONS.forEach((o) => {
@@ -733,18 +744,18 @@ JF.QuickEntry = (function () {
   };
 
   const openForm = async (id) => {
-    const body = await (FORMS[id] || (async () => JF.Utils.el("div", {}, "Form unavailable.")))();
+    const body = await buildForm(id);
     const saveBtn = JF.Utils.el("button", { type: "button", class: "btn btn--primary" }, "Save Record");
     saveBtn.addEventListener("click", async () => {
       saveBtn.disabled = true; saveBtn.textContent = "Saving...";
       try {
-        const res = await (SAVE[id] || (async () => null))(body);
+        const res = await saveForm(id, body);
         if (!res) { saveBtn.disabled = false; saveBtn.textContent = "Save Record"; return; }
         // No repaint call is needed here: every save above goes through
         // JF.Store.*.create(), and the store emits "change" with the real entity
         // name (insemination, health, ...), which the department hub already
         // listens for.
-        JF.Toast.show(`${res.label} saved successfully!`, { type: "success", action: res.id ? { label: "Go to record", href: res.tab ? `#animal/${res.id}/${res.tab}` : (res.id.startsWith?.("C") ? `#animal/${res.id}` : "#reminders"), onClick: () => { JF.Modal.close(); JF.App.navigate(res.tab ? `#animal/${res.id}/${res.tab}` : (res.id.startsWith?.("C") ? `#animal/${res.id}` : "#reminders")); } } : null });
+        announce(res);
         JF.Modal.close();
       } catch (e) {
         console.error(e);
@@ -776,5 +787,5 @@ JF.QuickEntry = (function () {
     if (chip) { chip.checked = true; chip.dispatchEvent(new Event("change", { bubbles: true })); }
   };
 
-  return { init, openPicker, openForm, openObserve, OPTIONS };
+  return { init, openPicker, openForm, openObserve, buildForm, saveForm, OPTIONS };
 })();
