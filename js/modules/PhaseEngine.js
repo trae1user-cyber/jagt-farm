@@ -91,19 +91,19 @@ JF.PhaseEngine = (function () {
 
   /**
    * Keep the Livestock asset for this animal EQUAL to the phase value. The
-   * journal delta posted = phase value − already-booked value, where booked =
-   * the purchase price (if any) + every prior phase-revaluation row. So a
-   * purchased cow booked at cost is topped up (or written down) to the farm's
-   * fixed schedule, and each Calf→Preg Heifer→Cow step-up posts only its step.
+   * delta posted = phase value − what the JOURNAL already carries for this
+   * animal, i.e. its own prior revaluation rows. Booked is read from the ledger
+   * and never from animal.PurchasePrice: a price the farmer typed is not a
+   * rupee in the ledger until something posts it, and counting it as booked
+   * made every purchased animal post a write-down that the next sweep had to
+   * reverse — the pair cancelled out and the ledger drifted away from the
+   * profile. Each Calf→Preg Heifer→Cow step-up still posts only its step.
    */
   const postRevaluation = async (animal, value, phase) => {
     const id = animal.AnimalID || animal.id;
     const journal = await JF.Store.journal.list();
     const mine = journal.filter((j) => j.ReferenceID && String(j.ReferenceID).startsWith(`PHASE-REVAL-${id}-`));
-    const purchaseBooked =
-      Number(animal.PurchasePrice || 0) ||
-      (await JF.Store.purchases.list().catch(() => [])).filter((p) => p.AnimalID === id).reduce((s, p) => s + Number(p.PurchasePrice || p.TotalCost || 0), 0);
-    const booked = purchaseBooked + mine.reduce((s, j) => s + (j.CreditAccount === "Livestock" ? -Number(j.Amount || 0) : Number(j.Amount || 0)), 0);
+    const booked = mine.reduce((s, j) => s + (j.CreditAccount === "Livestock" ? -Number(j.Amount || 0) : Number(j.Amount || 0)), 0);
     const delta = Math.round(value - booked);
     if (Math.abs(delta) < 1) return false;
     const ref = `PHASE-REVAL-${id}-${mine.length + 1}-${String(phase).replace(/\s+/g, "")}`;
