@@ -153,6 +153,10 @@ JF.Cascade = (function () {
     }
   });
 
+  // A deleted animal takes its derived asset row with it, so the Livestock
+  // balance never carries the value of an animal that no longer exists.
+  on("animals:deleted", (a) => JF.PhaseEngine?.forgetAnimal(a?.AnimalID || (typeof a === "string" ? a : a?.id)));
+
   // (3) ACCOUNTING double-entry journal creation.
   // Every department that spends or earns money posts through post() below, so
   // the Finance view and the Dashboard head always agree with the operational

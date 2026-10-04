@@ -228,9 +228,13 @@ JF.App = (function () {
     // subscribe once (double subscription would double every journal entry).
     try {
       if (!JF.Store.isBridged || !JF.Store.isBridged()) {
-        JF.Store.on("change", ({ entity, action, record }) => {
+        JF.Store.on("change", ({ entity, action, record, id }) => {
           if (action === "create" && record) JF.Cascade.fire(`${entity}:created`, record);
           if (action === "update" && record) JF.Cascade.fire(`${entity}:updated`, record);
+          // A delete carries the id; the Mongo adapter returns "true" rather than the
+          // deleted row, so the AnimalID has to come from the id when there is no
+          // record to read it from.
+          if (action === "delete") JF.Cascade.fire(`${entity}:deleted`, { AnimalID: (record && record.AnimalID) || id, id, record });
         });
         if (JF.Store.markBridged) JF.Store.markBridged();
       }

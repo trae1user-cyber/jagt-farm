@@ -164,6 +164,30 @@ JF.PhaseEngine = (function () {
     return fixed;
   };
 
+  /** Animals deleted in this session: never re-valued, never re-posted. */
+  const dropped = new Set();
+
+  /**
+   * Forget a deleted animal completely. Its PHASE-REVAL rows are DERIVED from
+   * its phase exactly as reminders are derived from records, so they leave with
+   * it and the Livestock balance returns to what it was before the animal
+   * existed. Posting a mirror row instead would leave a compensating pair
+   * behind - the thing that went wrong the last time. Idempotent: nothing to
+   * remove is a no-op. The id is remembered so a sweep already in flight cannot
+   * post for an animal that has just been deleted.
+   */
+  const forgetAnimal = async (animalId) => {
+    if (!animalId || typeof animalId !== "string") return 0;
+    dropped.add(animalId);
+    const journal = await JF.Store.journal.list();
+    const mine = journal.filter((j) => j.ReferenceID && String(j.ReferenceID).startsWith(`PHASE-REVAL-${animalId}-`));
+    let n = 0;
+    for (const row of mine) {
+      try { await JF.Store.journal.delete(row.id); n++; } catch (e) { console.warn("[PhaseEngine:forget]", animalId, e.message); }
+    }
+    return n;
+  };
+
   /**
    * Sync phases (and asset values) for the whole herd. Returns change count.
    * Only one pass runs at a time: two overlapping passes would each read the
@@ -186,6 +210,8 @@ JF.PhaseEngine = (function () {
     let changes = await linkRelationships(d);
     for (const a of d.animals) {
       try {
+        const animalId = a.AnimalID || a.id;
+        if (dropped.has(animalId)) continue; // deleted while this pass was running
         const { phase, status, value, reason } = phaseOf(a, d);
         const patch = {};
         if (phase && a.Category !== phase && !["Sold", "Deceased"].includes(a.CurrentStatus)) patch.Category = phase;
@@ -216,5 +242,5 @@ JF.PhaseEngine = (function () {
     setTimeout(() => syncAll().catch(() => {}), 1200); // boot pass (after LifeCycle's promotions)
   };
 
-  return { phaseOf, syncAll, linkRelationships, VALUES, init };
+  return { phaseOf, syncAll, linkRelationships, forgetAnimal, VALUES, init };
 })();
