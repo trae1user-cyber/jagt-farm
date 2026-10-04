@@ -69,6 +69,16 @@ JF.ReproIntel = (function () {
 
   /* ---------------- Episode clustering ---------------- */
 
+  // Records may name an animal by AnimalID, internal id, name or tag. Resolve a
+  // reference (with a synthetic stand-in when the animal is not in the list) and
+  // match on any alias, so a cow whose entries were logged by name still gets
+  // her episodes, traffic light and scorecard.
+  const resolveAnimal = (animals, ref) =>
+    JF.Utils.findAnimal(animals, ref) || { AnimalID: ref, id: ref };
+  const belongs = (animal, rec) => JF.Utils.recordBelongsTo(rec, animal, {
+    idKey: "AnimalID", also: ["AnimalID", "AnimalName", "MotherID", "FatherID", "CalfID", "id"],
+  });
+
   // Events fold into one episode when gaps stay under the window (hours).
   const CLUSTER_HOURS = 96; // 4 days
 
@@ -78,9 +88,9 @@ JF.ReproIntel = (function () {
    * optional standalone observation rows; AIs from insemination.
    */
   const episodesFor = (animalId, { heats = [], inseminations = [], healths = [], animals = [] } = {}) => {
-    const animal = animals.find((a) => a.AnimalID === animalId || a.id === animalId);
+    const animal = resolveAnimal(animals, animalId);
     const obs = [];
-    (heats || []).filter((h) => h.AnimalID === animalId).forEach((h) => {
+    (heats || []).filter((h) => belongs(animal, h)).forEach((h) => {
       const syms = Array.isArray(h.Symptoms) ? h.Symptoms : String(h.Symptoms || "").split(",").map((s) => s.trim()).filter(Boolean);
       const moment = momentOf(h, "HeatDate");
       obs.push({
@@ -93,7 +103,7 @@ JF.ReproIntel = (function () {
       });
     });
     const ais = (inseminations || [])
-      .filter((x) => x.AnimalID === animalId)
+      .filter((x) => belongs(animal, x))
       .map((x) => ({ at: momentOf(x, "Date"), dateKey: JF.Utils.formatDate(x.Date || "", "yyyy-MM-dd"), time: x.Time || "", raw: x, kind: "ai" }))
       .sort((a, b) => a.at - b.at);
 
@@ -308,6 +318,7 @@ JF.ReproIntel = (function () {
 
   const trafficLight = async (animal) => {
     const aID = animal.AnimalID || animal.id;
+    const mineOf = (list) => (list || []).filter((r) => belongs(animal, r));
     const status = animal.CurrentStatus || "";
     if (["Sold", "Deceased"].includes(status)) return { ...TRAFFIC.green, hidden: true };
     if (status === "Pregnant") return { ...TRAFFIC.blue, next: "Calving monitoring" };
@@ -323,10 +334,10 @@ JF.ReproIntel = (function () {
     const today = JF.Utils.todayISO();
     const since = (iso) => JF.Utils.daysBetween(iso, today);
 
-    const lastHeat = heats.filter((h) => h.AnimalID === aID).sort((a, b) => new Date(b.HeatDate) - new Date(a.HeatDate))[0];
-    const lastAI = insem.filter((x) => x.AnimalID === aID).sort((a, b) => new Date(b.Date) - new Date(a.Date))[0];
-    const lastPreg = preg.filter((x) => x.AnimalID === aID).sort((a, b) => new Date(b.Date) - new Date(a.Date))[0];
-    const openCase = healths.find((h) => h.AnimalID === aID && ["Open", "Under Treatment"].includes(h.RecoveryStatus || ""));
+    const lastHeat = mineOf(heats).sort((a, b) => new Date(b.HeatDate) - new Date(a.HeatDate))[0];
+    const lastAI = mineOf(insem).sort((a, b) => new Date(b.Date) - new Date(a.Date))[0];
+    const lastPreg = mineOf(preg).sort((a, b) => new Date(b.Date) - new Date(a.Date))[0];
+    const openCase = mineOf(healths).find((h) => ["Open", "Under Treatment"].includes(h.RecoveryStatus || ""));
 
     if (openCase) {
       const follow = openCase.FollowUpDate ? since(openCase.FollowUpDate) : 0;
@@ -348,20 +359,22 @@ JF.ReproIntel = (function () {
       if (d >= exp - 3) return { ...TRAFFIC.yellow, next: `Heat expected in ${Math.max(0, exp - d)}d`, record: lastHeat };
       return { ...TRAFFIC.green, next: "Routine monitoring", record: lastHeat };
     }
-    if (calvings.some((c) => c.AnimalID === aID)) return { ...TRAFFIC.green, next: "Post-calving monitoring" };
+    if (mineOf(calvings).length) return { ...TRAFFIC.green, next: "Post-calving monitoring" };
     return { ...TRAFFIC.green, next: "Routine monitoring" };
   };
 
   /* ---------------- Scorecard (record quality, not fertility) ---------------- */
 
   const scorecardFor = async (animalId) => {
-    const [heats, insem, preg] = await Promise.all([
+    const [heats, insem, preg, animals] = await Promise.all([
       JF.Store.heat.list(), JF.Store.insemination.list(), JF.Store.pregnancy.list(),
+      JF.Store.animals.list().catch(() => []),
     ]);
+    const animal = resolveAnimal(animals, animalId);
     const mine = {
-      heats: heats.filter((h) => h.AnimalID === animalId),
-      ais: insem.filter((x) => x.AnimalID === animalId),
-      pregs: preg.filter((x) => x.AnimalID === animalId),
+      heats: heats.filter((h) => belongs(animal, h)),
+      ais: insem.filter((x) => belongs(animal, x)),
+      pregs: preg.filter((x) => belongs(animal, x)),
     };
     // Heat detection: share of AIs that had a heat record within the prior 3 days.
     const withHeat = mine.ais.filter((ai) => mine.heats.some((h) => {

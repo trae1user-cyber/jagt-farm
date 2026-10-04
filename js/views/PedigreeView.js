@@ -16,7 +16,7 @@ JF.Views = JF.Views || {};
 JF.Views.Pedigree = (function () {
   const $ = () => document.getElementById("view-container");
 
-  const byId = (animals, id) => animals.find((a) => a.AnimalID === id || a.id === id) || null;
+  const byId = (animals, id) => JF.Utils.findAnimal(animals, id);
 
   const card = (a, { role = "", clickable = true } = {}) => {
     if (!a) return null;

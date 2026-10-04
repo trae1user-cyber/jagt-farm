@@ -14,17 +14,19 @@ window.JF = window.JF || {};
  *   app already speaks (Calf/Heifer/Pregnant/Lactating/Dry/Open/...); Category
  *   and CurrentGroup follow the phase so lists and groups agree.
  *
- * ASSET VALUES (farm's fixed schedule, written to the journal automatically):
- *   non-pregnant calf  ₹70,000 · pregnant heifer ₹1,20,000 · calved/lactating cow ₹1,80,000
+ * ASSET VALUES (the farm's fixed schedule, written to the journal automatically):
+ *   calf / young stock ₹40,000 · pregnant heifer ₹70,000 · lactating or dry cow ₹1,50,000
  *   A revaluation journal entry (Dr Livestock · Cr/Ld Owner Capital) is posted
  *   whenever an animal's phase value changes — idempotent, one row per change.
+ *   The value is DERIVED from the phase, never typed in: PhaseEngine is its only
+ *   writer, every other screen just reads animal.AssetValue.
  *
  * Nothing here invents facts: phases derive from DOB + calving + pregnancy
  * records, and every phase change is stamped UpdatedAt with the source.
  */
 JF.PhaseEngine = (function () {
 
-  const VALUES = { calf: 70000, pregHeifer: 120000, cow: 180000 };
+  const VALUES = { calf: 40000, pregHeifer: 70000, cow: 150000 };
 
   const todayISO = () => JF.Utils.todayISO();
   const byDate = (a, b) => String(a).localeCompare(String(b));
@@ -43,14 +45,22 @@ JF.PhaseEngine = (function () {
     const female = (a.Gender || "Female") === "Female";
     if (["Sold", "Deceased"].includes(a.CurrentStatus)) return { phase: a.CurrentStatus, group: a.CurrentGroup, value: null, reason: "left the herd" };
 
-    const calvings = (d.calving || []).filter((c) => c.AnimalID === id).map((c) => c.Date || c.CalvingDate).filter(Boolean).sort(byDate);
+    // Records may point at this animal by AnimalID, by name the farmer typed, or
+    // by tag — match on any alias so a calving logged against "dabbi" still
+    // makes her a Cow instead of leaving her showing as a Heifer.
+    const mine = (list, idKey) => (list || []).filter((r) =>
+      JF.Utils.sameAnimal(a, r[idKey]) ||
+      (idKey !== "MotherID" && JF.Utils.sameAnimal(a, r.MotherID)) ||
+      (idKey !== "FatherID" && JF.Utils.sameAnimal(a, r.FatherID)));
+
+    const calvings = mine(d.calving, "AnimalID").map((c) => c.Date || c.CalvingDate).filter(Boolean).sort(byDate);
     const parity = calvings.length;
     const ageDays = a.DateOfBirth ? JF.Utils.daysBetween(a.DateOfBirth, todayISO()) : null;
 
     // Pregnancy: latest positive check (or a future expected calving) AFTER the last calving.
     const lastCalving = parity ? calvings[parity - 1] : null;
-    const positives = (d.pregnancy || [])
-      .filter((p) => p.AnimalID === id && String(p.Result || "").toLowerCase() === "positive" && p.Date)
+    const positives = mine(d.pregnancy, "AnimalID")
+      .filter((p) => String(p.Result || "").toLowerCase() === "positive" && p.Date)
       .map((p) => p.Date).sort(byDate);
     const lastPositive = positives[positives.length - 1] || null;
     const pregnant = !!lastPositive && (!lastCalving || lastPositive > lastCalving);
@@ -61,7 +71,7 @@ JF.PhaseEngine = (function () {
     }
     if (parity > 0) {
       // Cow: dry only when a dry-off happened after the last calving.
-      const dryOffs = (d.dryOff || []).filter((x) => x.AnimalID === id).map((x) => x.Date).filter(Boolean).sort(byDate);
+      const dryOffs = mine(d.dryOff, "AnimalID").map((x) => x.Date).filter(Boolean).sort(byDate);
       const lastDry = dryOffs[dryOffs.length - 1] || null;
       const dry = lastDry && (!lastCalving || lastDry > lastCalving);
       const phase = "Cow";
@@ -112,6 +122,47 @@ JF.PhaseEngine = (function () {
     return true;
   };
 
+  /**
+   * Heal the pedigree links the entry flow could not know about: a calf whose
+   * birth was recorded without parents inherits them from its calving record,
+   * and a parent recorded only as a typed name is linked to the real animal of
+   * that name when one exists. Runs before phases so the very next sweep sees
+   * the true family. Returns the number of records repaired.
+   */
+  const linkRelationships = async (d) => {
+    const calvings = d.calving || [];
+    let fixed = 0;
+    for (const calf of d.animals) {
+      if (["Sold", "Deceased"].includes(calf.CurrentStatus)) continue;
+      const patch = {};
+      const cv = calvings.find((c) => JF.Utils.sameAnimal(calf, c.CalfID));
+      if (cv) {
+        if (!calf.MotherID && cv.AnimalID) patch.MotherID = cv.AnimalID;
+        if (!calf.FatherID && cv.SireID) patch.FatherID = cv.SireID;
+        if (!calf.SireName && !cv.SireID && cv.SireName) patch.SireName = cv.SireName;
+        if (!calf.DateOfBirth && (cv.Date || cv.CalvingDate)) patch.DateOfBirth = cv.Date || cv.CalvingDate;
+        if ((!calf.Name || calf.Name === calf.AnimalID) && cv.CalfName) patch.Name = cv.CalfName;
+      }
+      // Mother/father recorded only as a typed name → link the real animal.
+      if (!patch.MotherID && !calf.MotherID && calf.MotherName) {
+        const m = JF.Utils.findAnimal(d.animals, calf.MotherName);
+        if (m && m.id !== calf.id) patch.MotherID = m.AnimalID || m.id;
+      }
+      if (!patch.FatherID && !calf.FatherID && calf.SireName) {
+        const f = JF.Utils.findAnimal(d.animals, calf.SireName);
+        if (f && f.id !== calf.id) patch.FatherID = f.AnimalID || f.id;
+      }
+      if (Object.keys(patch).length) {
+        try {
+          await JF.Store.animals.update(calf.id, { ...patch, UpdatedAt: new Date().toISOString() });
+          Object.assign(calf, patch);
+          fixed++;
+        } catch (e) { console.warn("[PhaseEngine:link]", calf.AnimalID, e.message); }
+      }
+    }
+    return fixed;
+  };
+
   /** Sync phases (and asset values) for the whole herd. Returns change count. */
   const syncAll = async () => {
     const d = {
@@ -120,7 +171,7 @@ JF.PhaseEngine = (function () {
       pregnancy: await JF.Store.pregnancy.list(),
       dryOff: await JF.Store.dryOff.list(),
     };
-    let changes = 0;
+    let changes = await linkRelationships(d);
     for (const a of d.animals) {
       try {
         const { phase, group, status, value, reason } = phaseOf(a, d);
@@ -128,6 +179,9 @@ JF.PhaseEngine = (function () {
         if (phase && a.Category !== phase && !["Sold", "Deceased"].includes(a.CurrentStatus)) patch.Category = phase;
         if (group && a.CurrentGroup !== group) patch.CurrentGroup = group;
         if (status && a.CurrentStatus !== status) patch.CurrentStatus = status;
+        // The asset value is derived, so it is written from here and from nowhere
+        // else — it follows the animal through a calving without anyone typing it.
+        if (value != null && Number(a.AssetValue || 0) !== value) patch.AssetValue = value;
         if (Object.keys(patch).length) {
           patch.UpdatedAt = new Date().toISOString();
           await JF.Store.animals.update(a.id, patch);
@@ -150,5 +204,5 @@ JF.PhaseEngine = (function () {
     setTimeout(() => syncAll().catch(() => {}), 1200); // boot pass (after LifeCycle's promotions)
   };
 
-  return { phaseOf, syncAll, VALUES, init };
+  return { phaseOf, syncAll, linkRelationships, VALUES, init };
 })();

@@ -13,13 +13,23 @@ JF.Timeline = (function () {
     { entity: "expenses",     Title: "💰 Expense recorded",       Icon: "money",       DateKey: "Date",        Kind: "finance",   DotClass: "timeline__dot--finance" },
   ];
 
+  // Resolve the animal once, then match records on any alias (AnimalID, id,
+  // name, tag) so the timeline is never empty for entries logged by name.
+  const resolve = async (animalId) => {
+    try { return JF.Utils.findAnimal(await JF.Store.animals.list(), animalId); } catch (e) { return null; }
+  };
+  const belongs = (animal, rec) => JF.Utils.recordBelongsTo(rec, animal, {
+    idKey: "AnimalID", also: ["AnimalID", "AnimalName", "MotherID", "FatherID", "CalfID", "id"],
+  });
+
   const animalFor = async (animalId) => {
     const events = [];
+    const animal = await resolve(animalId);
     for (const t of TYPES) {
       try {
         const all = await JF.Store[t.entity].list();
         all.forEach((rec) => {
-          if (rec.AnimalID && rec.AnimalID === animalId) {
+          if (rec.AnimalID && belongs(animal, rec)) {
             events.push({
               id: `${t.entity}-${rec.id}`,
               Kind: t.Kind,
@@ -84,9 +94,10 @@ JF.Timeline = (function () {
    */
   const animalForSync = (animalId, cache = {}) => {
     const events = [];
+    const animal = cache.animal || JF.Utils.findAnimal(cache.animals || [], animalId);
     TYPES.forEach((t) => {
       (cache[t.entity] || []).forEach((rec) => {
-        if (rec && rec.AnimalID === animalId) {
+        if (rec && belongs(animal, rec)) {
           events.push({
             id: `${t.entity}-${rec.id}`,
             Kind: t.Kind,

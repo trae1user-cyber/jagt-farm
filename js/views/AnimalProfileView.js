@@ -190,6 +190,8 @@ JF.Views.AnimalProfile = (function () {
         offspringCount != null ? info("Offspring on farm", String(offspringCount)) : null,
         info("Purchase Date", JF.Utils.formatDate(a?.PurchaseDate)),
         info("Purchase Price", a?.PurchasePrice ? money(a.PurchasePrice) : "—"),
+        // Derived from the animal's phase by PhaseEngine — read-only here.
+        info("Asset Value", a?.AssetValue ? `${money(a.AssetValue)} · ${a.Category || ""}` : "—"),
         info("Ident. Marks", a?.IdentificationMarks),
         JF.Utils.el("div", { style: { marginTop: "var(--space-3)" } },
           JF.Utils.el("a", { class: "btn btn--ghost btn--sm", href: `#pedigree/${a?.AnimalID || aID}` }, "Open full pedigree →")),

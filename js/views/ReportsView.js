@@ -20,7 +20,7 @@ JF.Views.Reports = (function () {
       JF.Store.deworming.list(), JF.Store.vaccination.list(), JF.Store.death.list(),
       JF.Store.purchases.list(), JF.Store.sales.list(), JF.Store.expenses.list(), JF.Store.journal.list(),
     ]);
-    const name = (id) => { const a = animals.find((x) => x.AnimalID === id); return a ? `${a.Name || ""} (${id})` : (id || "—"); };
+    const name = (id) => { const a = JF.Utils.findAnimal(animals, id); return a ? `${a.Name || ""} (${a.AnimalID || a.id})` : (id || "—"); };
     const active = animals.filter((a) => !["Sold", "Deceased"].includes(a.CurrentStatus));
     return { animals, active, heats, ais, pregs, calvs, healths, dews, vax, deaths, purchases, sales, expenses, journal, name };
   };

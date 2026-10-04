@@ -34,7 +34,7 @@ JF.Views.Calves = (function () {
 
   /* ---------- Birth Records ---------- */
   const birthsPage = (calvings, animals) => {
-    const name = (id) => animals.find((a) => a.AnimalID === id)?.Name || id || "—";
+    const name = (id) => JF.Utils.findAnimal(animals, id)?.Name || id || "—";
     return dataTable(["Date", "Mother", "Calf", "Gender", "Weight", "Health", "Type", "Vet"],
       calvings.map((c) => {
         const td = (h) => JF.Utils.el("td", {}, h);

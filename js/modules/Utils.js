@@ -81,6 +81,68 @@ JF.Utils = (function () {
   const today = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; };
   const todayISO = () => formatDate(today(), "yyyy-MM-dd");
 
+  /* ---------- Identity & relationship helpers ----------
+   * Real farm data links records inconsistently: an animal can be referenced by
+   * AnimalID (COW-003), by a name the farmer typed ("dabbi"), by a tag, or by
+   * the adapter's internal record id. Every cross-section lookup funnels through
+   * these helpers so a calving entered against "dabbi" still shows up on her
+   * profile, her calf's pedigree, the calving log and the herd lists alike. */
+  const norm = (v) => String(v ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+
+  // The raw value a record uses to point at an animal (AnimalID, id, MotherID…).
+  const anyId = (v) => (v == null ? "" : String(v).trim());
+
+  // Every string an animal can legitimately be referred to by.
+  const aliasesOf = (a) => {
+    if (!a) return [];
+    return [a.AnimalID, a.id, a.Name, a.TagNumber]
+      .map((v) => norm(v))
+      .filter(Boolean);
+  };
+
+  const sameAnimal = (a, ref) => {
+    const r = norm(ref);
+    if (!r || !a) return false;
+    return aliasesOf(a).includes(r);
+  };
+
+  // Does a record (calving, heat, journal…) belong to this animal? Compares the
+  // record's own id field first, then every relationship field it may carry.
+  const recordBelongsTo = (rec, a, { idKey = "AnimalID", also = ["MotherID", "FatherID", "CalfID", "id", "AnimalName", "MotherName"] } = {}) => {
+    if (!rec || !a) return false;
+    const refs = [rec[idKey], ...also.map((k) => rec[k])];
+    return refs.some((r) => sameAnimal(a, r));
+  };
+
+  // Find one animal in a list by any alias (AnimalID / id / Name / Tag).
+  const findAnimal = (animals, ref) => (animals || []).find((x) => sameAnimal(x, ref)) || null;
+
+  // A resilient date key: accepts Date objects or any string/format the records
+  // may hold. Returns NaN for missing/invalid values so callers can show "—".
+  const dateKey = (v) => {
+    if (!v) return NaN;
+    if (v instanceof Date) return v.getTime();
+    const t = new Date(v).getTime();
+    return Number.isNaN(t) ? NaN : t;
+  };
+
+  // Sort a copy of records newest-first by a date field, safely.
+  const byDateDesc = (list, keys = ["Date", "HeatDate", "DateGiven", "CalvingDate"]) =>
+    (list || []).slice().sort((x, y) => {
+      const kx = keys.find((k) => x[k] != null) || keys[0];
+      const ky = keys.find((k) => y[k] != null) || keys[0];
+      return (dateKey(y[ky]) || 0) - (dateKey(x[kx]) || 0);
+    });
+
+  // Latest value of a date field across records (null when none are valid).
+  const latestDate = (list, keys = ["Date", "HeatDate", "DateGiven", "CalvingDate"]) => {
+    let best = null;
+    (list || []).forEach((r) => {
+      keys.forEach((k) => { const t = dateKey(r[k]); if (!Number.isNaN(t) && (best == null || t > best)) best = t; });
+    });
+    return best == null ? null : new Date(best).toISOString();
+  };
+
   const ageInYears = (dob) => {
     if (!isDate(dob)) return NaN;
     const d = new Date(dob);
@@ -201,6 +263,7 @@ JF.Utils = (function () {
 
   return {
     uid, uidSeq, money, formatDate, parseDate, isDate, addDays, daysBetween, today, todayISO,
+    norm, anyId, aliasesOf, sameAnimal, recordBelongsTo, findAnimal, dateKey, byDateDesc, latestDate,
     ageInYears, ageLabel, el, clear, debounce, svgIcon, photoURL, portraitSVG,
   };
 })();
