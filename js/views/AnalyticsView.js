@@ -48,7 +48,7 @@ JF.Views.Analytics = (function () {
       JF.Store.expenses.list().catch(() => []),
       JF.Store.sales.list().catch(() => []),
       JF.Store.journal.list().catch(() => []),
-      JF.Store.reminders.list().catch(() => []),
+      JF.RuleEngine.live().catch(() => []),
     ]);
 
     const active = animals.filter((a) => !["Sold", "Deceased"].includes(a.CurrentStatus));

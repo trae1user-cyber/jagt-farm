@@ -149,7 +149,11 @@ JF.Store = (function () {
     milkSales: wrapEntity("milkSales"),
     expenses: wrapEntity("expenses"),
     journal: wrapEntity("journal"),
+    // Reminders are derived (RuleEngine.live) - this collection holds only the
+    // farmer's OWN reminders plus their Done/Dismiss/Snooze decisions, keyed by
+    // the derived row's id. Nothing the system computes is ever stored.
     reminders: wrapEntity("reminders"),
+    reminderState: wrapEntity("reminderState"),
     files: wrapEntity("files"),
     dryOff: wrapEntity("dryOff"),
     rules: wrapEntity("rules"),

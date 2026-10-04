@@ -62,8 +62,8 @@ JF.Search = (function () {
     } catch (e) { /* noop */ }
 
     try {
-      if (JF.Store && JF.Store.reminders) {
-        const rems = (await JF.Store.reminders.list() || []).filter((r) =>
+      if (JF.RuleEngine && JF.RuleEngine.live) {
+        const rems = (await JF.RuleEngine.live() || []).filter((r) =>
           (r.AnimalID || "").toLowerCase().includes(qq) ||
           (r.ReminderType || "").toLowerCase().includes(qq) ||
           (r.Notes || "").toLowerCase().includes(qq)

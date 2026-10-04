@@ -22,7 +22,7 @@ JF.Views.Calendar = (function () {
       JF.Store.calving.list().catch(() => []),
       JF.Store.vaccination.list().catch(() => []),
       JF.Store.deworming.list().catch(() => []),
-      JF.Store.reminders.list().catch(() => []),
+      JF.RuleEngine.live().catch(() => []),
       JF.Store.animals.list().catch(() => []),
       JF.Store.settings.allMap().catch(() => ({})),
       JF.Store.milkSales.list().catch(() => []),
@@ -30,7 +30,7 @@ JF.Views.Calendar = (function () {
       JF.Store.purchases.list().catch(() => []),
       JF.Store.sales.list().catch(() => []),
     ]);
-    const nameOf = (id) => { const a = animals.find((x) => x.AnimalID === id); return a ? (a.Name || id) : (id || ""); };
+    const nameOf = (id) => { const a = JF.Utils.findAnimal(animals, id); return a ? (a.Name || a.AnimalID) : (id || ""); };
 
     heats.forEach((h) => add(h.HeatDate, { type: "Heat", color: "badge--danger", animal: h.AnimalID, label: nameOf(h.AnimalID), icon: "fire", href: `#animal/${h.AnimalID}/heat` }));
     ais.forEach((x) => add(x.Date, { type: "AI", color: "badge--oxblood", animal: x.AnimalID, label: nameOf(x.AnimalID), icon: "heart", href: `#animal/${x.AnimalID}/insemination` }));

@@ -39,8 +39,9 @@ JF.RuleEngine = (function () {
   let overrides = [];
   let loadedAt = null;
   let loadSource = "defaults";
-  const inflight = new Map();
-  let bulkRunning = false; // a full rebuild is in progress: per-animal hooks must stand down
+  let liveCache = null; // { at, days, rows }
+  let livePending = null; // { days, promise } - one derivation at a time
+  let boundInvalidator = false;
 
   const truthy = (v) => v === true || v === 1 || /^(true|yes|1|active)$/i.test(String(v == null ? "" : v));
   const norm = (s) => String(s == null ? "" : s).trim().toLowerCase();
@@ -216,15 +217,20 @@ JF.RuleEngine = (function () {
     // "no entries of that kind" instead of killing reminder generation.
     const load = async (store) => {
       if (cache[store]) return cache[store];
-      try { cache[store] = await JF.Store[store].list(); }
-      catch (e) {
+      try { cache[store] = await JF.Store[store].list();} catch (e) {
         console.warn(`[RuleEngine] ${store} unavailable — evaluating without it.`, e.message);
         cache[store] = [];
-        cache._degraded = true; // data is incomplete: stale-reminder cleanup must stand down
       }
       return cache[store];
     };
-    const mine = (list, id) => list.filter((x) => x.AnimalID === animal.AnimalID || x.AnimalID === animal.id);
+    // Alias-aware: match by any alias (AnimalID, internal id, name) — this
+    // replaces the fragile `x.AnimalID === animal.AnimalID || x.AnimalID === animal.id`
+    // which silently dropped entries logged against a name ("dabbi") or a
+    // diverged internal id, so their rules never fired. The second arg is kept
+    // for call-site compatibility (the date key is handled by the caller).
+    const mine = (list, id) => list.filter((x) => JF.Utils.recordBelongsTo(x, animal, {
+      idKey: "AnimalID", also: ["AnimalID", "AnimalName", "MotherID", "FatherID", "CalfID", "id"],
+    }));
     const [heat, ai, preg, calving, health, deworming, vaccination, dryOff, purchases, sales, death] = await Promise.all([
       load("heat"), load("insemination"), load("pregnancy"), load("calving"), load("health"),
       load("deworming"), load("vaccination"), load("dryOff"), load("purchases"), load("sales"), load("death"),
@@ -621,8 +627,20 @@ JF.RuleEngine = (function () {
   };
 
   /* ------------------------------------------------------------------ */
-  /* Evaluation                                                          */
+  /* Live reminders - derived on read, never written                      */
   /* ------------------------------------------------------------------ */
+
+  /**
+   * A reminder is a pure function of the entries plus the rulebook, so it is
+   * computed when it is read rather than written when an entry changes. Nothing
+   * in this section touches the database: the same inputs always produce the
+   * same rows, and a herd of any size costs zero writes.
+   *
+   * The only reminder data that persists is what a human decided (Done /
+   * Dismiss / Snooze, in `reminderState`) and the farmer's own custom reminders.
+   */
+  const HORIZON_DAYS = 60;
+  const LIVE_TTL_MS = 60 * 1000;
 
   const statusFor = (due, completed) => {
     if (completed) return "Completed";
@@ -634,203 +652,101 @@ JF.RuleEngine = (function () {
 
   const reminderId = (rule, animalId) => `RMN-${rule.RuleID}-${animalId}`;
 
-  const evaluateAnimal = (animalId, cache = {}) => {
-    // While a full pass runs, individual evaluations would interleave and skew it.
-    if (bulkRunning) return Promise.resolve({ created: 0, updated: 0, completed: 0, skipped: "bulk-run" });
-    if (inflight.has(animalId)) return inflight.get(animalId);
-    const p = evaluateAnimalInner(animalId, cache).finally(() => inflight.delete(animalId));
-    inflight.set(animalId, p);
-    return p;
+  /** The row one rule produces for one animal, or null when it does not apply. */
+  const deriveOne = (rule, animal, ctx, state) => {
+    if (!rule.Active) return null;
+    if (!applies(rule, ctx)) return null;
+    if (String(rule.TriggerEvent || "").toUpperCase() === "DAILY" || String(rule.AppliesTo).toLowerCase() === "farm") return null;
+    // CHECK rules surface in the data-quality panel; STATUS / CREATE_EVENT are
+    // carried out by the lifecycle + cascade layer, not by a reminder.
+    const actionType = String(rule.ActionType).toUpperCase();
+    if (actionType === "CHECK" || actionType === "STATUS" || actionType === "CREATE_EVENT") return null;
+
+    const valueInfo = resolve(rule, animal.AnimalID);
+    const res = compute(rule, ctx, valueInfo.value);
+    if (!res) return null;
+
+    // EndAfter closes a rule's window (colostrum is only actionable for a couple
+    // of days) instead of leaving a newborn task overdue on a grown animal.
+    const windowEnd = Number(rule.EndAfter);
+    if (Number.isFinite(windowEnd) && windowEnd > 0 && addDays(res.due, windowEnd) < today()) return null;
+
+    const id = reminderId(rule, animal.AnimalID);
+    const decided = state.get(id);
+    // A snooze only pushes a date that is still ahead of the real due date, so it
+    // can never hide a task that has since come round again.
+    let due = res.due;
+    if (decided && decided.SnoozedUntil && decided.SnoozedUntil > due) due = decided.SnoozedUntil;
+
+    const done = res.done || completedFor(rule, ctx) || (decided && decided.Status === "Completed");
+    return {
+      id,
+      ReminderID: id,
+      ReferenceID: id,
+      AnimalID: animal.AnimalID,
+      RuleID: String(rule.RuleID),
+      ReminderType: rule.Title || rule.RuleName,
+      DueDate: due,
+      ReminderDate: addDays(res.due, -(Number(rule.ReminderBefore) || 0)),
+      Time: null,
+      Priority: res.priority || rule.Priority || "Normal",
+      Status: decided && decided.Status === "Dismissed" ? "Dismissed" : statusFor(due, done),
+      Kind: actionType === "CALCULATION" ? "CALCULATION" : "REMINDER",
+      Category: rule.Category || "",
+      Source: `${rule.Category} rule ${rule.RuleID}`,
+      ValueSource: valueInfo.layer,
+      Notes: res.note || rule.Notes || rule.Action || "",
+      RepeatEveryDays: Number(rule.Interval) > 0 && rule.TriggerEvent !== "BIRTH" ? Number(rule.Interval) : null,
+    };
   };
 
-  const evaluateAnimalInner = async (animalId, cache) => {
+  const derive = async (days) => {
     await ensureLoaded();
-    const animals = cache.animals || (cache.animals = await JF.Store.animals.list());
-    const animal = animals.find((x) => x.AnimalID === animalId || x.id === animalId);
-    if (!animal) return { created: 0, completed: 0 };
-    const ctx = await buildContext(animal, cache);
-    const all = cache.allReminders || (cache.allReminders = await JF.Store.reminders.list());
-    const mine = all.filter((r) => r.AnimalID === animal.AnimalID || r.AnimalID === animal.id);
-
-    let created = 0, completed = 0, updated = 0;
-
-    // Sold / deceased: close everything (RM-010, RM-011) and generate nothing.
-    if (ctx.withdrawn) {
-      for (const rem of mine) {
-        if (rem.Status === "Completed") continue;
-        await JF.Store.reminders.update(rem.id, { Status: "Completed", CompletedAt: today(), Notes: `${rem.Notes || ""} [closed: animal sold/deceased]`.trim() });
-        completed++;
-      }
-      return { created, completed, updated };
-    }
-
-    for (const rule of rules) {
-      const ruleId = String(rule.RuleID);
-      const existing = mine.find((r) => String(r.RuleID) === ruleId);
-      // RM-012/013: a disabled rule stops generating but its history is preserved.
-      if (!rule.Active) continue;
-      if (!applies(rule, ctx)) continue;
-      if (String(rule.TriggerEvent).toUpperCase() === "DAILY" || String(rule.AppliesTo).toLowerCase() === "farm") continue;
-
-      const valueInfo = resolve(rule, animal.AnimalID);
-      const res = compute(rule, ctx, valueInfo.value);
-      if (!res) {
-        // Determinism: the engine no longer produces this rule for this animal
-        // (its trigger entry was deleted, or a newer record supersedes it — e.g.
-        // a NEW heat recorded before the next expected heat makes reminders
-        // computed from the OLD heat obsolete). Close any open reminder it left
-        // behind instead of letting a stale date dangle forever. Skipped when
-        // entity data was unreadable this pass, so a network hiccup can never
-        // close valid reminders.
-        if (!cache._degraded && existing && existing.Status !== "Completed") {
-          try {
-            await JF.Store.reminders.update(existing.id, {
-              Status: "Completed", CompletedAt: today(),
-              Notes: `${existing.Notes || ""} [superseded: newer records changed this rule's outcome]`.trim(),
-            });
-            completed++;
-          } catch (e) { /* keep going */ }
-        }
-        continue;
-      }
-
-      // CHECK rules are surfaced in the data-quality panel; STATUS / CREATE_EVENT
-      // are carried out by the lifecycle + cascade layer (status changes, calf
-      // creation, accounting) and are listed here for documentation only.
-      const actionType = String(rule.ActionType).toUpperCase();
-      if (actionType === "CHECK" || actionType === "STATUS" || actionType === "CREATE_EVENT") continue;
-
-      const due = res.due;
-      // EndAfter closes a rule's window (e.g. colostrum is only actionable for a
-      // couple of days); without it a 3-year-old calf would show "overdue" for a
-      // newborn task forever.
-      const windowEnd = Number(rule.EndAfter);
-      if (Number.isFinite(windowEnd) && windowEnd > 0 && addDays(due, windowEnd) < today()) continue;
-      const lead = Number(rule.ReminderBefore) || 0;
-      const remindOn = addDays(due, -lead);
-      const payload = {
-        ReminderID: reminderId(rule, animal.AnimalID),
-        AnimalID: animal.AnimalID,
-        RuleID: ruleId,
-        ReminderType: rule.Title || rule.RuleName,
-        ReferenceID: reminderId(rule, animal.AnimalID),
-        DueDate: due,
-        ReminderDate: remindOn,
-        Time: null,
-        Priority: res.priority || rule.Priority || "Normal",
-        Status: statusFor(due, false),
-        Kind: String(rule.ActionType).toUpperCase() === "CALCULATION" ? "CALCULATION" : "REMINDER",
-        Group: rule.Category || "",
-        Source: `${rule.Category} rule ${ruleId}`,
-        ValueSource: valueInfo.layer,
-        Notes: res.note || rule.Notes || rule.Action || "",
-      };
-      if (Number(rule.Interval) > 0 && rule.TriggerEvent !== "BIRTH") payload.RepeatEveryDays = Number(rule.Interval);
-      if (res.done || completedFor(rule, ctx)) { payload.Status = "Completed"; payload.CompletedAt = payload.CompletedAt || today(); }
-
-      const dup = mine.find((r) => String(r.RuleID) === ruleId && r.DueDate === due && String(r.id) !== String(existing?.id));
-      const target = existing || dup || null;
-      try {
-        if (target) {
-          const changed = ["DueDate", "ReminderDate", "Priority", "Status", "Notes", "ValueSource", "Kind"].some((k) => String(target[k] ?? "") !== String(payload[k] ?? ""));
-          if (changed) { await JF.Store.reminders.update(target.id, payload); updated++; if (payload.Status === "Completed") completed++; }
-        } else {
-          await JF.Store.reminders.create(payload);
-          created++;
-        }
-        // One open row per rule per animal is the contract (ReminderID is
-        // deterministic). Any OTHER open row with this RuleID is a leftover
-        // computed from an older record — e.g. a heat that a newer heat has
-        // replaced — so it is superseded here instead of reappearing forever.
-        for (const stale of mine) {
-          if (String(stale.RuleID) !== ruleId || String(stale.id) === String(target?.id)) continue;
-          if (stale.Status === "Completed") continue;
-          await JF.Store.reminders.update(stale.id, {
-            Status: "Completed", CompletedAt: today(),
-            Notes: `${stale.Notes || ""} [superseded: newer records changed this reminder]`.trim(),
-          });
-          completed++;
-        }
-      } catch (e) { console.warn(`[RuleEngine] ${ruleId} ${animal.AnimalID}:`, e.message); }
-    }
-
-    // Housekeeping: reminders for animals that no longer exist (deleted from
-    // the herd) are orphaned rows — the views filter by animal join, but badge
-    // counts and the reminders list keep showing them. Close them here (once
-    // per sweep: the flag lives on the shared evaluation cache).
-    if (cache.allReminders && !cache._degraded && !cache._orphansClosed) {
-      cache._orphansClosed = true;
-      const ids = new Set(animals.map((a) => a.AnimalID || a.id));
-      for (const r of cache.allReminders) {
-        if (r.AnimalID && !ids.has(r.AnimalID) && r.Status !== "Completed" && r.Status !== "Dismissed") {
-          try {
-            await JF.Store.reminders.update(r.id, { Status: "Completed", CompletedAt: today(), Notes: `${r.Notes || ""} [closed: animal no longer in the herd]`.trim() });
-            completed++;
-          } catch (e) { /* keep going */ }
-        }
-      }
-    }
-
-    if (created || updated) await audit("evaluate", "Animals", animal.AnimalID, `+${created} new, ~${updated} recalculated, ${completed} completed (rules: ${loadSource})`);
-    return { created, completed, updated };
-  };
-
-  /** Recompute every animal from real records (no guard - internal). */
-  const runAll = async () => {
+    // Everything past the horizon is dropped, which also keeps every overdue row
+    // however long ago it fell due.
+    const cutoff = addDays(today(), days);
     const cache = {};
     const animals = await JF.Store.animals.list();
     cache.animals = animals;
-    cache.allReminders = await JF.Store.reminders.list();
-    let created = 0, updated = 0, completed = 0;
-    for (const a of animals) {
-      const r = await evaluateAnimalInner(a.AnimalID || a.id, cache);
-      created += r.created; updated += (r.updated || 0); completed += (r.completed || 0);
+    const [decided, custom] = await Promise.all([
+      JF.Store.reminderState.list().catch(() => []),
+      JF.Store.reminders.list().catch(() => []),
+    ]);
+    const state = new Map(decided.map((s) => [String(s.id), s]));
+    const rows = [];
+    for (const animal of animals) {
+      const ctx = await buildContext(animal, cache);
+      if (ctx.withdrawn) continue; // sold / deceased: nothing left to action
+      for (const rule of rules) {
+        const row = deriveOne(rule, animal, ctx, state);
+        if (row && row.DueDate <= cutoff) rows.push(row);
+      }
     }
-    return { animals: animals.length, created, updated, completed };
-  };
-
-  /** Recompute every animal from real records. Idempotent by design. */
-  const evaluateAll = async () => {
-    if (bulkRunning) return { animals: 0, created: 0, updated: 0, completed: 0, skipped: "already-running" };
-    await ensureLoaded();
-    bulkRunning = true;
-    try { return await runAll(); } finally { bulkRunning = false; }
-  };
-
-  /** Let evaluations that are already running finish before we touch their output. */
-  const drain = async () => { await Promise.allSettled([...inflight.values()]); };
-
-  /* ------------------------------------------------------------------ */
-  /* Reminder lifecycle helpers                                          */
-  /* ------------------------------------------------------------------ */
-
-  const clearReminders = async ({ includeManual = true } = {}) => {
-    await ensureLoaded();
-    const all = await JF.Store.reminders.list();
-    const isRule = (r) => !!(r.RuleID || String(r.ReferenceID || "").startsWith("RMN-") || String(r.ReminderID || "").startsWith("RMN-"));
-    const doomed = includeManual ? all : all.filter(isRule);
-    for (const r of doomed) { try { await JF.Store.reminders.delete(r.id); } catch (e) {} }
-    await audit("clear-reminders", "Reminders", "", `deleted ${doomed.length} reminder(s)${includeManual ? "" : " (rule-generated only)"}`);
-    return doomed.length;
+    // Custom reminders are the farmer's own notes: stored, and merged in here.
+    rows.push(...custom.filter((r) => !r.RuleID && r.DueDate && r.DueDate <= cutoff));
+    return rows.sort((a, b) =>
+      String(a.DueDate).localeCompare(String(b.DueDate))
+      || String(a.ReminderType).localeCompare(String(b.ReminderType)));
   };
 
   /**
-   * The "delete all previous reminders and rebuild from entries" action.
-   * Atomic: per-animal hooks stand down, in-flight evaluations are drained, then
-   * everything is deleted and regenerated in one pass - so the result is exactly
-   * what the entries + rules say, every time.
+   * The reminder list every screen reads. Memoised for a minute so rendering
+   * does not recompute the whole herd, and invalidated by any store change so
+   * an edit shows up at once.
    */
-  const rebuild = async () => {
-    if (bulkRunning) return { removed: 0, animals: 0, created: 0, updated: 0, completed: 0, skipped: "already-running" };
-    bulkRunning = true;
-    try {
-      await drain();
-      const removed = await clearReminders({ includeManual: true });
-      const res = await runAll();
-      await audit("rebuild-reminders", "Reminders", "", `cleared ${removed}, regenerated ${res.created} from ${res.animals} animals`);
-      return { removed, ...res };
-    } finally { bulkRunning = false; }
+  const live = ({ days = HORIZON_DAYS, fresh = false } = {}) => {
+    if (!fresh && liveCache && liveCache.days === days && Date.now() - liveCache.at < LIVE_TTL_MS) {
+      return Promise.resolve(liveCache.rows);
+    }
+    if (livePending && livePending.days === days) return livePending.promise;
+    const promise = derive(days)
+      .then((rows) => { liveCache = { at: Date.now(), days, rows }; return rows; })
+      .finally(() => { livePending = null; });
+    livePending = { days, promise };
+    return promise;
   };
+
+  const invalidateLive = () => { liveCache = null; };
 
   /* ------------------------------------------------------------------ */
   /* Explainability + reporting                                          */
@@ -998,40 +914,19 @@ JF.RuleEngine = (function () {
 
   return {
     /**
-     * Boot: load the rulebook, then recompute every reminder. The full sweep
-     * writes one reminder per rule per animal and can cost dozens of round
-     * trips, so it is SKIPPED when a sweep already ran recently (6 h) and
-     * reminders exist — a fresh page load then costs nothing but one list.
-     * Pass { forceEvaluate: true } to sweep regardless (Rules screen reload).
+     * Boot: load the rulebook. There is no sweep - reminders are derived when a
+     * screen reads them - so this costs one read and no writes.
      */
-    init: async ({ forceEvaluate = false } = {}) => {
+    init: async () => {
       await load();
-      let skip = false;
-      if (!forceEvaluate) {
-        try {
-          const stamp = Number(localStorage.getItem("jf_last_eval") || 0);
-          if (stamp && Date.now() - stamp < 6 * 3600 * 1000) {
-            const [existing, animals] = await Promise.all([JF.Store.reminders.list(), JF.Store.animals.list()]);
-            const active = animals.filter((a) => !["Sold", "Deceased"].includes(a.CurrentStatus));
-            // Skip only when every animal already has at least one reminder row.
-            // A freshly added animal (or one whose evaluation failed during an
-            // outage) would otherwise wait up to 6 h for its care plan — the
-            // "why is there no first-dewormer reminder?" bug.
-            const covered = new Set(existing.map((r) => r.AnimalID));
-            skip = existing.length > 0 && active.every((a) => covered.has(a.AnimalID || a.id));
-            if (!skip && existing.length) console.info("[JF] Some animals have no reminders yet — running a catch-up sweep.");
-          }
-        } catch (e) { /* storage unavailable — always evaluate */ }
-      }
-      if (skip) {
-        console.info("[JF] Rule sweep skipped — reminders are current (evaluated < 6 h ago).");
-      } else {
-        await evaluateAll();
-        try { localStorage.setItem("jf_last_eval", String(Date.now())); } catch (e) {}
+      if (!boundInvalidator && typeof JF.Store?.on === "function") {
+        boundInvalidator = true;
+        JF.Store.on("change", invalidateLive);
       }
       return stats();
     },
-    load, ensureLoaded, focus, installDefaults, syncFromMirror, mirrorStatus, evaluateAll, evaluateAnimal, clearReminders, rebuild,
+    load, ensureLoaded, focus, installDefaults, syncFromMirror, mirrorStatus,
+    live, invalidateLive, horizonDays: HORIZON_DAYS,
     explain, dataQuality, setRuleField, setParamValue, addOverride, removeOverride, stats, isEnabled,
     listRules, listParams,
     resolveValue: (ruleId, animalId) => {

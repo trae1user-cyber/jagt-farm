@@ -42,16 +42,34 @@ JF.Views.Reminders = (function () {
     ]),
   ]);
 
+  /**
+ * Reminders are derived, so "Done" / "Dismiss" / "Snooze" only record what the
+ * farmer decided - they never rewrite the underlying entry. The decision is
+ * keyed by the derived row's id (RMN-<RuleID>-<AnimalID>), and the engine reads
+ * it back on the next derivation.
+ */
+  const decide = async (r, patch) => {
+    try {
+      // create() is an upsert on id, so this works whether or not the row exists.
+      await JF.Store.reminderState.create({ id: r.id, AnimalID: r.AnimalID || null, ...patch });
+      JF.RuleEngine.invalidateLive();
+    } catch (e) {
+      JF.Toast.show("Could not save that decision - the farm API does not accept it yet.", "danger");
+      return false;
+    }
+    return true;
+  };
+
   const act = async (r, status) => {
-    await JF.Store.reminders.update(r.id, { Status: status });
+    if (!await decide(r, { Status: status, CompletedAt: status === "Completed" ? JF.Utils.todayISO() : null, SnoozedUntil: null })) return;
     JF.Toast.show(status === "Completed" ? "Reminder completed." : "Reminder dismissed.", "success");
     render();
   };
 
   const snooze = async (r) => {
     const base = new Date(r.DueDate) > new Date() ? new Date(r.DueDate) : JF.Utils.today();
-    const nd = JF.Utils.addDays(base, 3);
-    await JF.Store.reminders.update(r.id, { DueDate: JF.Utils.formatDate(nd, "yyyy-MM-dd"), Status: "Upcoming" });
+    const nd = JF.Utils.formatDate(JF.Utils.addDays(base, 3), "yyyy-MM-dd");
+    if (!await decide(r, { Status: "Upcoming", SnoozedUntil: nd })) return;
     JF.Toast.show(`Snoozed to ${JF.Utils.formatDate(nd)}.`, "success");
     render();
   };
@@ -189,47 +207,14 @@ JF.Views.Reminders = (function () {
         JF.Utils.el("div", { class: "eyebrow" }, "🔔 Reminders"),
         JF.Utils.el("h1", { class: "page__title", style: { marginTop: "8px" } }, "Your Action List"),
         JF.Utils.el("p", { class: "page__sub", style: { marginTop: "var(--space-2)" } },
-          "Overdue first, then today, then what's ahead. Snooze or dismiss anything that's handled."),
+          `Live from your records and rules - nothing is saved. Overdue first, then today, then the next ${JF.RuleEngine.horizonDays} days.`),
       ]),
       JF.Utils.el("div", { class: "page__actions" }, [
-        JF.Utils.el("button", {
-          class: "btn btn--ghost btn--sm", onclick: async () => {
-            const list = (await JF.Store.reminders.list()).filter((r) => bucketOf(r) === "overdue");
-            for (const r of list) await JF.Store.reminders.update(r.id, { DueDate: JF.Utils.todayISO(), Status: "Due Today" });
-            JF.Toast.show(list.length ? `${list.length} overdue reminders moved to today.` : "No overdue reminders.", "success");
-            render();
-          },
-        }, "Pull Overdue to Today"),
         JF.Utils.el("button", { class: "btn btn--accent btn--sm", onclick: () => openCustomModal() }, "+ Custom Reminder"),
-        JF.Utils.el("button", {
-          class: "btn btn--primary btn--sm", type: "button",
-          onclick: async () => {
-            if (!confirm("Rebuild every reminder from the entries on file?\n\nAll existing reminders (including manual ones) are deleted first, then regenerated from the Rules sheet against your real records. Nothing else is touched.")) return;
-            const btns = document.querySelectorAll(".page__actions .btn");
-            btns.forEach((b) => { b.disabled = true; });
-            JF.Toast.show("Rebuilding reminders from entries...", "info");
-            try {
-              const r = await JF.RuleEngine.rebuild();
-              JF.Toast.show(`Deleted ${r.removed} old reminder(s), regenerated ${r.created} from ${r.animals} animals' entries.`, "success");
-            } catch (e) {
-              JF.Toast.show(`Rebuild failed: ${e.message}`, "danger");
-            }
-            render();
-          },
-        }, "🔄 Rebuild From Entries"),
-        JF.Utils.el("button", {
-          class: "btn btn--ghost btn--sm", type: "button",
-          onclick: async () => {
-            if (!confirm("Delete ALL reminders?\n\nUse 'Rebuild From Entries' instead if you want them regenerated automatically from your records.")) return;
-            const n = await JF.RuleEngine.clearReminders({ includeManual: true });
-            JF.Toast.show(`Deleted ${n} reminder(s).`, "success");
-            render();
-          },
-        }, "🗑 Delete All Reminders"),
       ]),
     ]));
 
-    let all = (await JF.Store.reminders.list().catch(() => [])) || [];
+    let all = (await JF.RuleEngine.live().catch(() => [])) || [];
     const types = [...new Set(all.map((r) => r.ReminderType).filter(Boolean))].sort();
     const animals = [...new Set(all.map((r) => r.AnimalID).filter(Boolean))].sort();
     page.appendChild(filterBar(types, animals));

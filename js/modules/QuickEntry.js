@@ -29,13 +29,26 @@ JF.QuickEntry = (function () {
       : JF.Utils.el("input", { class: "input", type: opts.type || "text", id, value: opts.value ?? "", placeholder: opts.ph || "" }),
   ]);
 
-  const animalSelect = async (id) => {
+  // Pick-or-type animal field: click shows the herd list, typing filters it and
+  // lets any custom name/ID through. One control does both jobs, so a calving or
+  // heat entry can name an animal the master records don't know yet.
+  const animalSelect = async (id = "qe-animal", label = "Animal *") => {
     const animals = ((await JF.Store.animals.list()) || []).filter((a) => !["Sold", "Deceased"].includes(a.CurrentStatus));
-    const sel = JF.Utils.el("select", { class: "select", id }, [
-      JF.Utils.el("option", { value: "" }, "-- Select animal --"),
-      ...animals.map((a) => JF.Utils.el("option", { value: a.AnimalID }, `${a.Name} (${a.AnimalID})`)),
+    const listId = `${id}-list`;
+    return JF.Utils.el("div", { class: "field" }, [
+      JF.Utils.el("label", { class: "field__label" }, label),
+      JF.Utils.el("input", { class: "input", id, list: listId, autocomplete: "off", placeholder: "Click to pick from the herd — or type a name / ID" }),
+      JF.Utils.el("datalist", { id: listId }, animals.map((a) => JF.Utils.el("option", { value: a.AnimalID || a.id }, `${a.Name || ""} (${a.AnimalID || a.id})`))),
+      JF.Utils.el("div", { class: "field__hint" }, "Pick an existing animal or type a name — the entry links to the animal whenever the name matches."),
     ]);
-    return JF.Utils.el("div", { class: "field" }, [JF.Utils.el("label", { class: "field__label" }, "Animal *"), sel]);
+  };
+
+  // Resolve the pick-or-type animal field to a canonical AnimalID when it matches
+  // a real animal, otherwise keep exactly what was typed (so nothing is lost).
+  const pickedAnimal = async (id = "qe-animal") => {
+    const raw = $v(id);
+    const hit = await resolveParent(raw);
+    return { raw, id: hit.id || raw, name: hit.id ? null : (hit.name || null), matched: !!hit.id };
   };
 
   const dateField = (id = "qe-date") => field("Date *", id, { type: "date", value: JF.Utils.todayISO() });
@@ -117,48 +130,58 @@ JF.QuickEntry = (function () {
 
     async heat() {
       if (!ok([[$v("qe-animal"), "Animal"]])) return null;
+      const animal = await pickedAnimal();
       await JF.Store.heat.create({
-        HeatRecordID: `HEAT-${JF.Utils.uid()}`, AnimalID: $v("qe-animal"), HeatDate: $v("qe-date"),
+        HeatRecordID: `HEAT-${JF.Utils.uid()}`, AnimalID: animal.id, AnimalName: animal.name,
+        HeatDate: $v("qe-date"),
         HeatTime: $v("qe-time") || null, HeatIntensity: $v("qe-int") || "Moderate",
         DetectionMethod: $v("qe-det") || "Visual",
         Symptoms: [...document.querySelectorAll(".qe-symptom:checked")].map((c) => c.value),
-        PhotoURL: JF.Utils.portraitSVG(`heat-${$v("qe-animal")}-${$v("qe-date")}`, "cattle"),
+        PhotoURL: JF.Utils.portraitSVG(`heat-${animal.id}-${$v("qe-date")}`, "cattle"),
       });
-      return { label: "Heat record", id: $v("qe-animal"), tab: "heat" };
+      return { label: "Heat record", id: animal.id, tab: "heat" };
     },
 
     async ai() {
       if (!ok([[$v("qe-animal"), "Animal"]])) return null;
+      const animal = await pickedAnimal();
       await JF.Store.insemination.create({
-        InseminationID: `AI-${JF.Utils.uid()}`, AnimalID: $v("qe-animal"), Date: $v("qe-date"),
+        InseminationID: `AI-${JF.Utils.uid()}`, AnimalID: animal.id, AnimalName: animal.name,
+        Date: $v("qe-date"),
         Time: $v("qe-aitime") || null, // time-of-day drives the AI-timing coverage bands
         Method: $v("qe-method") || "Artificial Insemination", SemenBullID: $v("qe-bull") || null,
         Technician: $v("qe-tech") || null, Cost: num("qe-cost"),
       });
-      return { label: "Insemination", id: $v("qe-animal"), tab: "insemination" };
+      return { label: "Insemination", id: animal.id, tab: "insemination" };
     },
 
     async preg() {
       if (!ok([[$v("qe-animal"), "Animal"], [$v("qe-result"), "Result"]])) return null;
+      const animal = await pickedAnimal();
       await JF.Store.pregnancy.create({
-        PregnancyCheckID: `PREG-${JF.Utils.uid()}`, AnimalID: $v("qe-animal"), Date: $v("qe-date"),
+        PregnancyCheckID: `PREG-${JF.Utils.uid()}`, AnimalID: animal.id, AnimalName: animal.name,
+        Date: $v("qe-date"),
         Method: $v("qe-pmethod") || "Rectal Palpation", Result: $v("qe-result"),
         Veterinarian: $v("qe-vet") || null, InseminationID: $v("qe-ai") || null,
       });
-      return { label: "Pregnancy check", id: $v("qe-animal"), tab: "pregnancy" };
+      return { label: "Pregnancy check", id: animal.id, tab: "pregnancy" };
     },
 
     async calving() {
-      if (!ok([[$v("qe-animal"), "Animal"]])) return null;
+      if (!ok([[$v("qe-animal"), "Mother"]])) return null;
       const animals = await JF.Store.animals.list();
       const year = new Date($v("qe-date")).getFullYear();
       const n = animals.filter((a) => a.AnimalID?.startsWith(`CALF-${year}-`)).length + 1;
       const calfID = `CALF-${year}-${String(n).padStart(3, "0")}`;
       const calfGender = $v("qe-cgender") || "Female";
       const sire = await resolveParent($v("qe-calfsire"));
-      const mother = await JF.Store.animals.get($v("qe-animal"));
+      // The mother may be clicked from the herd list or typed as a name/id —
+      // resolve it so the calving links to her real master record, and keep the
+      // typed name when she is not registered yet.
+      const mother = await pickedAnimal();
       await JF.Store.calving.create({
-        CalvingID: `CALV-${JF.Utils.uid()}`, AnimalID: $v("qe-animal"), Date: $v("qe-date"),
+        CalvingID: `CALV-${JF.Utils.uid()}`, AnimalID: mother.id, AnimalName: mother.name,
+        Date: $v("qe-date"),
         CalvingType: $v("qe-ctype") || "Normal", AssistanceRequired: false, Complications: "None",
         CalfID: calfID, CalfName: $v("qe-cname") || null, CalfGender: calfGender, CalfWeight: num("qe-cweight") || null,
         CalfHealth: $v("qe-chealth") || "Healthy", Veterinarian: $v("qe-vet") || null,
@@ -180,10 +203,10 @@ JF.QuickEntry = (function () {
         dose: row.querySelector(".qe-med-dose")?.value?.trim(),
         duration: row.querySelector(".qe-med-dur")?.value?.trim(),
       })).filter((m) => m.name);
-      const animals = await JF.Store.animals.list();
-      const cur = animals.find((x) => x.AnimalID === $v("qe-animal"));
+      const animal = await pickedAnimal();
+      const cur = JF.Utils.findAnimal(await JF.Store.animals.list(), animal.id);
       await JF.Store.health.create({
-        HealthRecordID: `HEA-${JF.Utils.uid()}`, AnimalID: $v("qe-animal"), Date: $v("qe-date"),
+        HealthRecordID: `HEA-${JF.Utils.uid()}`, AnimalID: animal.id, AnimalName: animal.name, Date: $v("qe-date"),
         Problem: $v("qe-problem"), Diagnosis: $v("qe-diag") || null,
         Treatment: $v("qe-treat") || null, Medicine: meds[0]?.name || null, Dose: meds[0]?.dose || null,
         Medicines: meds, Veterinarian: $v("qe-vet") || null, TreatmentCost: num("qe-cost"),
@@ -195,50 +218,53 @@ JF.QuickEntry = (function () {
       if (cur && !["Under Treatment", "Sick"].includes(cur.CurrentStatus)) {
         await JF.Store.animals.update(cur.id, { PreviousStatus: cur.CurrentStatus, UpdatedAt: new Date().toISOString() });
       }
-      return { label: "Treatment", id: $v("qe-animal"), tab: "health" };
+      return { label: "Treatment", id: animal.id, tab: "health" };
     },
 
     async vaccine() {
       if (!ok([[$v("qe-vaccine"), "Vaccine"]])) return null;
+      const animal = await pickedAnimal();
       await JF.Store.vaccination.create({
-        VaccinationID: `VAC-${JF.Utils.uid()}`, AnimalID: $v("qe-animal"),
+        VaccinationID: `VAC-${JF.Utils.uid()}`, AnimalID: animal.id, AnimalName: animal.name,
         Vaccine: $v("qe-vaccine"), Salt: $v("qe-vsalt") || null, DateGiven: $v("qe-date"), BatchNumber: $v("qe-batch") || null,
         NextDueDate: $v("qe-next") || null, Veterinarian: $v("qe-vet") || null, Cost: num("qe-cost"),
       });
-      return { label: "Vaccination", id: $v("qe-animal"), tab: "vaccination" };
+      return { label: "Vaccination", id: animal.id, tab: "vaccination" };
     },
 
     async deworm() {
       if (!ok([[$v("qe-animal"), "Animal"]])) return null;
+      const animal = await pickedAnimal();
       await JF.Store.deworming.create({
-        DewormingID: `DEW-${JF.Utils.uid()}`, AnimalID: $v("qe-animal"), Date: $v("qe-date"),
+        DewormingID: `DEW-${JF.Utils.uid()}`, AnimalID: animal.id, AnimalName: animal.name, Date: $v("qe-date"),
         Medicine: $v("qe-med") || null, Salt: $v("qe-salt") || null, Dose: $v("qe-dose") || null,
         Weight: num("qe-weight") || null, Veterinarian: $v("qe-vet") || null, Cost: num("qe-cost"),
         NextDueDate: $v("qe-next") || null,
       });
-      return { label: "Deworming", id: $v("qe-animal"), tab: "deworming" };
+      return { label: "Deworming", id: animal.id, tab: "deworming" };
     },
 
     async dryoff() {
       if (!ok([[$v("qe-animal"), "Animal"]])) return null;
-      const animals = await JF.Store.animals.list();
-      const a = animals.find((x) => x.AnimalID === $v("qe-animal"));
+      const animal = await pickedAnimal();
+      const a = JF.Utils.findAnimal(await JF.Store.animals.list(), animal.id);
       const dim = a && a.LactationStart ? JF.Utils.daysBetween(a.LactationStart, $v("qe-date")) : null;
       await JF.Store.dryOff.create({
-        DryOffID: `DRY-${JF.Utils.uid()}`, AnimalID: $v("qe-animal"), Date: $v("qe-date"),
+        DryOffID: `DRY-${JF.Utils.uid()}`, AnimalID: animal.id, AnimalName: animal.name, Date: $v("qe-date"),
         ExpectedCalvingDate: $v("qe-nextcalv") || null, DaysInMilkAtDry: dim, Reason: $v("qe-dryreason") || "Scheduled dry-off",
       });
-      return { label: `Dry-off · ${$v("qe-animal")}`, id: $v("qe-animal"), tab: "overview" };
+      return { label: `Dry-off · ${animal.id}`, id: animal.id, tab: "overview" };
     },
 
     async death() {
       if (!ok([[$v("qe-animal"), "Animal"]])) return null;
+      const animal = await pickedAnimal();
       await JF.Store.death.create({
-        DeathID: `DEATH-${JF.Utils.uid()}`, AnimalID: $v("qe-animal"), Date: $v("qe-date"),
+        DeathID: `DEATH-${JF.Utils.uid()}`, AnimalID: animal.id, AnimalName: animal.name, Date: $v("qe-date"),
         Cause: $v("qe-cause") || "Unknown", Veterinarian: $v("qe-vet") || null,
         EstimatedValue: num("qe-value") || null, Notes: $v("qe-notes") || null,
       });
-      return { label: "Death record", id: $v("qe-animal"), tab: "overview" };
+      return { label: "Death record", id: animal.id, tab: "overview" };
     },
 
     async expense() {
@@ -269,7 +295,8 @@ JF.QuickEntry = (function () {
     },
 
     async purchase() {
-      if (!ok([[$v("qe-seller"), "Seller"], []]) || !positive([[num("qe-price"), "Price"]])) return null;
+      if (!ok([[$v("qe-seller"), "Seller"]])) return null;
+      if (!positive([[num("qe-price"), "Price"]])) return null;
       const species = $v("qe-species") || "Cattle";
       const prefix = species === "Buffalo" ? "BUFF" : ($v("qe-gender") === "Male" ? "BULL" : "COW");
       const all = await JF.Store.animals.list();
@@ -295,29 +322,32 @@ JF.QuickEntry = (function () {
     },
 
     async sale() {
-      if (!ok([[$v("qe-animal"), "Animal"], []]) || !positive([[num("qe-price"), "Sale price"]])) return null;
+      if (!ok([[$v("qe-animal"), "Animal"]])) return null;
+      if (!positive([[num("qe-price"), "Sale price"]])) return null;
+      const animal = await pickedAnimal();
       const price = num("qe-price"), trans = num("qe-trans"), comm = num("qe-comm");
       await JF.Store.sales.create({
-        SaleID: `SALE-${JF.Utils.uid()}`, Date: $v("qe-date"), AnimalID: $v("qe-animal"),
+        SaleID: `SALE-${JF.Utils.uid()}`, Date: $v("qe-date"), AnimalID: animal.id, AnimalName: animal.name,
         Buyer: $v("qe-buyer") || null, SalePrice: price, Transportation: trans, Commission: comm,
         OtherCost: 0, NetSale: price - trans - comm, PaymentMethod: $v("qe-pay") || "Cash",
         Reason: $v("qe-reason") || null,
       });
-      return { label: "Sale", id: $v("qe-animal"), tab: "overview" };
+      return { label: "Sale", id: animal.id, tab: "overview" };
     },
 
     async observe(formEl) {
       if (!ok([[$v("qe-animal"), "Animal"]])) return null;
       const signs = [...document.querySelectorAll(".qe-obs-sign:checked")].map((c) => c.value);
       if (!signs.length) { ok([["", "At least one observed sign"]]); return null; }
-      const animalId = $v("qe-animal");
+      const animal = await pickedAnimal();
+      const animalId = animal.id;
       let photoURL = null;
       try {
         const url = await JF.PhotoUpload.consume(formEl && formEl._photoField, { animalId, kind: "Heat" });
         if (url) photoURL = url;
       } catch (e) { /* photo optional */ }
       await JF.Store.heat.create({
-        HeatRecordID: `HEAT-${JF.Utils.uid()}`, AnimalID: animalId,
+        HeatRecordID: `HEAT-${JF.Utils.uid()}`, AnimalID: animalId, AnimalName: animal.name,
         HeatDate: $v("qe-date") || JF.Utils.todayISO(), HeatTime: $v("qe-time") || "",
         HeatIntensity: signs.some((s) => /standing/i.test(s)) ? "Standing" : "Observed",
         DetectionMethod: "Observation Sheet", Symptoms: signs,
@@ -329,7 +359,8 @@ JF.QuickEntry = (function () {
 
     async photo(formEl) {
       if (!ok([[$v("qe-animal"), "Animal"]])) return null;
-      const animalId = $v("qe-animal");
+      const animal = await pickedAnimal();
+      const animalId = animal.id;
       const kind = $v("qe-photo-kind") || "Profile";
       const fallback = JF.Utils.portraitSVG(`photo-${animalId}-${Date.now()}`, "cattle");
       let url = fallback, mode = "local";
@@ -346,8 +377,7 @@ JF.QuickEntry = (function () {
         Notes: mode === "drive" ? "Uploaded to the farm server" : "Stored on this device (backend not connected)",
       });
       if (kind === "Profile" || kind === "Identification") {
-        const animals = await JF.Store.animals.list();
-        const a = animals.find((x) => x.AnimalID === animalId || x.id === animalId);
+        const a = JF.Utils.findAnimal(await JF.Store.animals.list(), animalId);
         if (a) await JF.Store.animals.update(a.id, { PhotoURL: url });
       }
       JF.Toast.show(mode === "drive" ? "Photo uploaded to the server." : "Photo saved on this device (connect the farm API in Settings to sync).", mode === "drive" ? "success" : "warning");
@@ -434,7 +464,7 @@ JF.QuickEntry = (function () {
     ]),
 
     calving: async () => JF.Utils.el("div", { class: "form-stack" }, [
-      await animalSelect("qe-animal"), dateField(),
+      await animalSelect("qe-animal", "Mother * (pick from the herd or type her name)"), dateField(),
       field("Calving type", "qe-ctype", { options: ["Normal", "Assisted", "Dystokia", "C-Section"] }),
       field("Calf name", "qe-cname", { ph: "optional" }),
       field("Calf gender", "qe-cgender", { options: ["Female", "Male"] }),
@@ -506,7 +536,7 @@ JF.QuickEntry = (function () {
     dryoff: async () => {
       // Pre-fill the expected calving date from the derived model (AI + 283d).
       let suggested = "";
-      try { const board = await JF.LifeCycle.calvingBoard(); const row = board.find((r) => r.animal.AnimalID === $v("qe-animal")); if (row) suggested = row.lc.expectedCalving.date; } catch (e) {}
+      try { const board = await JF.LifeCycle.calvingBoard(); const row = board.find((r) => JF.Utils.sameAnimal(r.animal, $v("qe-animal"))); if (row) suggested = row.lc.expectedCalving.date; } catch (e) {}
       return JF.Utils.el("div", { class: "form-stack" }, [
         await animalSelect("qe-animal"),
         dateField(),
@@ -665,7 +695,7 @@ JF.QuickEntry = (function () {
     document: async () => JF.Utils.el("div", { class: "form-stack" }, [
       field("File name *", "qe-docname", { ph: "e.g. purchase-bill-PUR-001.pdf" }),
       field("Category", "qe-doccat", { options: ["Animal", "Veterinary", "Purchase", "Sale", "Invoices", "Certificates", "Other"] }),
-      field("Linked animal (optional)", "qe-animal", { ph: "e.g. COW-005" }),
+      await animalSelect("qe-animal", "Linked animal (optional)"),
       field("Record reference (optional)", "qe-docref", { ph: "e.g. PUR-001" }),
       field("Notes", "qe-docnotes"),
     ]),
@@ -673,7 +703,7 @@ JF.QuickEntry = (function () {
     reminder: async () => JF.Utils.el("div", { class: "form-stack" }, [
       field("Type *", "qe-remtype", { options: ["Heat Expected", "Pregnancy Check", "Treatment Follow-up", "Deworming", "Vaccination", "Expected Calving", "Custom"] }),
       field("Due date", "qe-remdue", { type: "date", value: JF.Utils.todayISO() }),
-      field("Animal (optional)", "qe-animal", { ph: "e.g. COW-005" }),
+      await animalSelect("qe-animal", "Animal (optional)"),
       field("Priority", "qe-rempri", { options: ["High", "Normal", "Low"] }),
       field("Notes", "qe-remnotes"),
     ]),
@@ -710,6 +740,10 @@ JF.QuickEntry = (function () {
       try {
         const res = await (SAVE[id] || (async () => null))(body);
         if (!res) { saveBtn.disabled = false; saveBtn.textContent = "Save Record"; return; }
+        // No repaint call is needed here: every save above goes through
+        // JF.Store.*.create(), and the store emits "change" with the real entity
+        // name (insemination, health, ...), which the department hub already
+        // listens for.
         JF.Toast.show(`${res.label} saved successfully!`, { type: "success", action: res.id ? { label: "Go to record", href: res.tab ? `#animal/${res.id}/${res.tab}` : (res.id.startsWith?.("C") ? `#animal/${res.id}` : "#reminders"), onClick: () => { JF.Modal.close(); JF.App.navigate(res.tab ? `#animal/${res.id}/${res.tab}` : (res.id.startsWith?.("C") ? `#animal/${res.id}` : "#reminders")); } } : null });
         JF.Modal.close();
       } catch (e) {

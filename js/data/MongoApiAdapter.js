@@ -29,7 +29,14 @@ JF.Data.MongoApiAdapter = (function () {
   // Entities that an older server deployment (API v1.0.x) does not recognise.
   // While the capability probe reports an old server, these are served as
   // empty lists WITHOUT a request — no 400s in the console, no lag.
-  const NEWER_ENTITIES = new Set(["insemination", "dryOff", "death", "groups"]);
+  const NEWER_ENTITIES = new Set(["death", "groups", "reminderState"]);
+
+  // The old server names some collections differently. When it reports
+  // "Unknown entity", the call is retried ONCE against the legacy name and the
+  // mapping is remembered for the session — so an AI entry still records on a
+  // server that only knows the "ai" collection, and switches back to the modern
+  // name automatically once the API is redeployed.
+  const LEGACY_ENTITY = { insemination: "ai", dryOff: "dry" };
 
   // Farm API defaults baked into the code, so every device connects with zero
   // setup. Settings can still override them (localStorage wins when present).
@@ -62,6 +69,7 @@ JF.Data.MongoApiAdapter = (function () {
       this._cache = new Map(); // entity -> { at, rows }
       this._cacheTTL = 30000; // 30s of instant navigation
       this._serverCapabilities = null; // set by warmup()'s version probe
+      this._legacyMap = new Map(); // entity -> legacy wire name (learned at runtime)
       this._tokenWarned = false; // one warning per session for a real token mismatch
       // A stored token that differs from the baked-in one MIGHT be stale. Until
       // warmup() proves it good (or heals it), the first list() calls hold back
@@ -116,6 +124,9 @@ JF.Data.MongoApiAdapter = (function () {
         } catch (e) { /* opaque — optimistically try bootstrap anyway */ }
         this._serverCapabilities = { bootstrap: supportsBootstrap };
         if (!supportsBootstrap) {
+          // Pre-seed the legacy collection names this deploy actually uses, so
+          // the first AI / dry-off write goes straight through with no 400 probe.
+          Object.entries(LEGACY_ENTITY).forEach(([modern, legacy]) => this._legacyMap.set(modern, legacy));
           await this._call("ping", {}, { quiet: true });
           return {};
         }
@@ -229,6 +240,26 @@ JF.Data.MongoApiAdapter = (function () {
       }
     }
 
+    /**
+     * Entity-aware call: uses the modern entity name, and transparently falls
+     * back to a legacy collection name when the deployed server does not know
+     * it (remembered for the session so later calls go straight through).
+     */
+    async _callEntity(action, entity, rest = {}, opts = {}) {
+      const wire = this._legacyMap.get(entity) || entity;
+      try {
+        return await this._call(action, { entity: wire, ...rest }, opts);
+      } catch (err) {
+        const legacy = LEGACY_ENTITY[entity];
+        if (legacy && !this._legacyMap.has(entity) && /Unknown entity/i.test(String(err.message))) {
+          this._legacyMap.set(entity, legacy);
+          console.info(`[MongoApi] server stores "${entity}" under the legacy "${legacy}" collection — mapped for this session.`);
+          return this._call(action, { entity: legacy, ...rest }, opts);
+        }
+        throw err;
+      }
+    }
+
     async _fallback(action, payload) {
       if (action === "list" || action === "listFiles") return [];
       if (action === "get") return null;
@@ -274,7 +305,7 @@ JF.Data.MongoApiAdapter = (function () {
       const hit = this._cacheGet(entity);
       if (hit) return hit;
       try {
-        const rows = await this._call("list", { entity });
+        const rows = await this._callEntity("list", entity);
         this._cacheSet(entity, rows);
         this._snapshot(entity, rows);
         return rows.map((r) => ({ ...r }));
@@ -297,10 +328,10 @@ JF.Data.MongoApiAdapter = (function () {
         throw err;
       }
     }
-    async get(entity, id) { return this._call("get", { entity, id }); }
+    async get(entity, id) { return this._callEntity("get", entity, { id }); }
 
     async create(entity, data) {
-      const r = await this._call("create", { entity, data });
+      const r = await this._callEntity("create", entity, { data });
       this._cacheDrop(entity);
       if (r) this._snapshotEdit(entity, (rows) => { rows.push(r); return rows; });
       this.emit(`${entity}:created`, r);
@@ -309,7 +340,7 @@ JF.Data.MongoApiAdapter = (function () {
     }
 
     async update(entity, id, patch) {
-      const r = await this._call("update", { entity, id, patch });
+      const r = await this._callEntity("update", entity, { id, patch });
       this._cacheDrop(entity);
       this._snapshotEdit(entity, (rows) => {
         const i = rows.findIndex((x) => String(x.id) === String(id));
@@ -323,7 +354,7 @@ JF.Data.MongoApiAdapter = (function () {
     }
 
     async delete(entity, id) {
-      const r = await this._call("delete", { entity, id });
+      const r = await this._callEntity("delete", entity, { id });
       this._cacheDrop(entity);
       // Remove the row from the offline snapshot too, so the deleted entry
       // cannot reappear the next time the API is unreachable.

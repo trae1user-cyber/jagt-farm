@@ -39,7 +39,7 @@ const ENTITIES = new Set([
   "animals", "calves", "heat", "ai", "insemination", "pregnancy", "calving", "dry",
   "dryOff", "death", "health", "vaccination", "deworming", "treatment", "milk",
   "milkSales", "expenses", "income", "sales", "purchases", "assets", "journal",
-  "reminders", "rules", "ruleParameters", "ruleOverrides", "settings", "files",
+  "reminders", "reminderState", "rules", "ruleParameters", "ruleOverrides", "settings", "files",
   "audit", "groups",
 ]);
 
@@ -74,10 +74,38 @@ function fileUrl(req, id) {
   return `${proto}://${host}/api-file/${id}`;
 }
 
+/**
+ * The website renamed the AI entity to "insemination", but the records already
+ * in MongoDB live in the old "ai" collection. Copy them across at boot so a
+ * redeploy does not show an empty AI history.
+ *
+ * Idempotent (upsert keyed on `id`) and non-destructive: "ai" is only read, so
+ * it stays as a backup. The website also falls back to "ai" on its own when it
+ * meets an older server, so this is belt-and-braces, not the only path.
+ */
+async function migrateAiRecords() {
+  try {
+    const docs = await db.collection("ai").find({}).toArray();
+    if (!docs.length) return;
+    let copied = 0;
+    for (const doc of docs) {
+      const { _id, ...rest } = doc;
+      if (!rest.id) continue;
+      await db.collection("insemination").replaceOne({ id: rest.id }, rest, { upsert: true });
+      copied++;
+    }
+    console.log(`[migrate] copied ${copied} AI record(s) from "ai" to "insemination"`);
+  } catch (err) {
+    // Never let a migration stop the API from serving the farm.
+    console.error("[migrate] ai -> insemination failed (continuing):", err.message);
+  }
+}
+
 async function main() {
   await client.connect();
   db = client.db(DB_NAME);
   console.log(`Connected to MongoDB: ${DB_NAME}`);
+  await migrateAiRecords();
 
   // ------------------------------------------------------------ endpoints --
   app.post("/", auth, async (req, res) => {

@@ -38,30 +38,36 @@ JF.LifeCycle = (function () {
     return out;
   };
 
-  const medicalCostOf = (animalId, d) => {
+  // A record belongs to an animal when any of its id/parent fields names that
+  // animal — by AnimalID, internal id, name the farmer typed, or tag.
+  const belongs = (animal, rec) => JF.Utils.recordBelongsTo(rec, animal, {
+    idKey: "AnimalID", also: ["AnimalID", "MotherID", "FatherID", "CalfID", "id", "AnimalName"],
+  });
+
+  const medicalCostOf = (animal, d) => {
     const parts = { treatments: 0, deworming: 0, vaccination: 0, expenses: 0 };
-    d.health.filter((h) => h.AnimalID === animalId).forEach((h) => parts.treatments += Number(h.TreatmentCost || 0));
-    d.deworming.filter((x) => x.AnimalID === animalId).forEach((x) => parts.deworming += Number(x.Cost || 0));
-    d.vaccination.filter((x) => x.AnimalID === animalId).forEach((x) => parts.vaccination += Number(x.Cost || 0));
-    d.expenses.filter((e) => e.AnimalID === animalId && MEDICAL_CATEGORIES.includes(e.Category)).forEach((e) => parts.expenses += Number(e.Amount || 0));
+    d.health.filter((h) => belongs(animal, h)).forEach((h) => parts.treatments += Number(h.TreatmentCost || 0));
+    d.deworming.filter((x) => belongs(animal, x)).forEach((x) => parts.deworming += Number(x.Cost || 0));
+    d.vaccination.filter((x) => belongs(animal, x)).forEach((x) => parts.vaccination += Number(x.Cost || 0));
+    d.expenses.filter((e) => belongs(animal, e) && MEDICAL_CATEGORIES.includes(e.Category)).forEach((e) => parts.expenses += Number(e.Amount || 0));
     const total = parts.treatments + parts.deworming + parts.vaccination + parts.expenses;
     // ISO string (not a Date object) so the >= comparisons below are string-safe.
     const yearAgo = JF.Utils.formatDate(JF.Utils.addDays(JF.Utils.todayISO(), -365), "yyyy-MM-dd");
     const last12m =
-      d.health.filter((h) => h.AnimalID === animalId && h.Date >= yearAgo).reduce((s, h) => s + Number(h.TreatmentCost || 0), 0) +
-      d.deworming.filter((x) => x.AnimalID === animalId && (x.Date || x.DateGiven) >= yearAgo).reduce((s, x) => s + Number(x.Cost || 0), 0) +
-      d.vaccination.filter((x) => x.AnimalID === animalId && x.DateGiven >= yearAgo).reduce((s, x) => s + Number(x.Cost || 0), 0) +
-      d.expenses.filter((e) => e.AnimalID === animalId && MEDICAL_CATEGORIES.includes(e.Category) && e.Date >= yearAgo).reduce((s, e) => s + Number(e.Amount || 0), 0);
-    const events = d.health.filter((h) => h.AnimalID === animalId).length;
+      d.health.filter((h) => belongs(animal, h) && h.Date >= yearAgo).reduce((s, h) => s + Number(h.TreatmentCost || 0), 0) +
+      d.deworming.filter((x) => belongs(animal, x) && (x.Date || x.DateGiven) >= yearAgo).reduce((s, x) => s + Number(x.Cost || 0), 0) +
+      d.vaccination.filter((x) => belongs(animal, x) && x.DateGiven >= yearAgo).reduce((s, x) => s + Number(x.Cost || 0), 0) +
+      d.expenses.filter((e) => belongs(animal, e) && MEDICAL_CATEGORIES.includes(e.Category) && e.Date >= yearAgo).reduce((s, e) => s + Number(e.Amount || 0), 0);
+    const events = d.health.filter((h) => belongs(animal, h)).length;
     return { parts, total, last12m, events };
   };
 
-  const expectedCalvingOf = (animalId, d, gestation) => {
-    const calvAfter = (date) => d.calving.some((c) => c.AnimalID === animalId && (c.Date || c.CalvingDate) > date);
-    const ais = d.insemination.filter((x) => x.AnimalID === animalId).sort((a, b) => byDate(b.Date, a.Date));
+  const expectedCalvingOf = (animal, d, gestation) => {
+    const calvAfter = (date) => d.calving.some((c) => belongs(animal, c) && (c.Date || c.CalvingDate) > date);
+    const ais = d.insemination.filter((x) => belongs(animal, x)).sort((a, b) => byDate(b.Date, a.Date));
     for (const ai of ais) {
       if (calvAfter(ai.Date)) return null; // an AI followed by a calving is history
-      const pdAfter = d.pregnancy.filter((p) => p.AnimalID === animalId && p.Date > ai.Date).sort((a, b) => byDate(b.Date, a.Date));
+      const pdAfter = d.pregnancy.filter((p) => belongs(animal, p) && p.Date > ai.Date).sort((a, b) => byDate(b.Date, a.Date));
       if (pdAfter.length && pdAfter[0].Result === "Negative") continue; // this AI failed; try the previous one
       const confirmed = pdAfter.some((p) => p.Result === "Positive");
       return {
@@ -82,7 +88,7 @@ JF.LifeCycle = (function () {
     };
     const id = animal.AnimalID || animal.id;
     const isFemale = (animal.Gender || "Female") === "Female";
-    const calvings = d.calving.filter((c) => c.AnimalID === id).sort((a, b) => byDate(a.Date || a.CalvingDate, b.Date || b.CalvingDate));
+    const calvings = d.calving.filter((c) => belongs(animal, c)).sort((a, b) => byDate(a.Date || a.CalvingDate, b.Date || b.CalvingDate));
     const parity = calvings.length;
     const lastCalving = parity ? (calvings[parity - 1].Date || calvings[parity - 1].CalvingDate) : null;
 
@@ -96,7 +102,7 @@ JF.LifeCycle = (function () {
     }
 
     // Dry-off history ends a lactation.
-    const dryOffs = d.dryOff.filter((x) => x.AnimalID === id).sort((a, b) => byDate(b.Date, a.Date));
+    const dryOffs = d.dryOff.filter((x) => belongs(animal, x)).sort((a, b) => byDate(b.Date, a.Date));
     const lastDryOff = dryOffs[0] || null;
     const activeLactation = lastCalving && (!lastDryOff || (lastDryOff.Date < lastCalving));
 
@@ -107,8 +113,8 @@ JF.LifeCycle = (function () {
       dim = JF.Utils.daysBetween(lastCalving, JF.Utils.todayISO());
     }
 
-    const expected = isFemale ? expectedCalvingOf(id, d, gestation || GESTATION_DEFAULT) : null;
-    const medical = medicalCostOf(id, d);
+    const expected = isFemale ? expectedCalvingOf(animal, d, gestation || GESTATION_DEFAULT) : null;
+    const medical = medicalCostOf(animal, d);
 
     const ageDays = animal.DateOfBirth ? JF.Utils.daysBetween(animal.DateOfBirth, JF.Utils.todayISO()) : null;
     const serviceReady = isFemale && !parity && ageDays != null && ageDays >= 410 && ageDays <= 900; // ~15-30 months, unborn-heifer window
@@ -245,18 +251,33 @@ JF.LifeCycle = (function () {
     });
 
     // Calving completes a lactation cycle: mother → Lactating Cow, parity stamped.
+    // The mother may be referenced by name/id/tag, so resolve by alias.
     JF.Cascade.on("calving:created", async (c) => {
       if (!c.AnimalID) return;
       const animals = await JF.Store.animals.list();
-      const a = animals.find((x) => x.AnimalID === c.AnimalID || x.id === c.AnimalID);
+      const a = JF.Utils.findAnimal(animals, c.AnimalID);
       if (!a) return;
-      const parity = (await JF.Store.calving.list()).filter((x) => x.AnimalID === c.AnimalID).length;
+      const parity = (await JF.Store.calving.list()).filter((x) => belongs(a, x)).length;
       const date = c.Date || c.CalvingDate || JF.Utils.todayISO();
       await JF.Store.animals.update(a.id, {
         CurrentStatus: "Lactating", Category: "Cow", PreviousStatus: null,
         LastCalvingDate: date, LactationStart: date, CalvingCount: parity,
         DryOffDate: null, UpdatedAt: new Date().toISOString(),
       });
+      // Link the newborn's master record back to both parents (the cascade may
+      // have created it before the mother's own aliases were known).
+      if (c.CalfID) {
+        const calf = JF.Utils.findAnimal(animals, c.CalfID);
+        if (calf) {
+          const patch = {};
+          if (!calf.MotherID) patch.MotherID = a.AnimalID || a.id;
+          if (!calf.FatherID && c.SireID) patch.FatherID = c.SireID;
+          if (!calf.SireName && !c.SireID && c.SireName) patch.SireName = c.SireName;
+          if (Object.keys(patch).length) {
+            try { await JF.Store.animals.update(calf.id, { ...patch, UpdatedAt: new Date().toISOString() }); } catch (e) { console.warn(e); }
+          }
+        }
+      }
     });
 
     // Dry-off ends the lactation.
@@ -267,22 +288,11 @@ JF.LifeCycle = (function () {
       if (!a) return;
       await JF.Store.animals.update(a.id, {
         CurrentStatus: "Dry", DryOffDate: r.Date || JF.Utils.todayISO(),
-        CurrentGroup: "Dry Lot", UpdatedAt: new Date().toISOString(),
+        CurrentLocation: "Dry Lot", UpdatedAt: new Date().toISOString(),
       });
-      // A dry cow heading to calving deserves a pre-calving check reminder.
-      if (r.ExpectedCalvingDate) {
-        const remindOn = JF.Utils.formatDate(JF.Utils.addDays(r.ExpectedCalvingDate, -7), "yyyy-MM-dd");
-        await JF.Cascade.makeReminder({
-          ReminderID: `RMN-DRY-${JF.Utils.uid("dry")}`,
-          AnimalID: r.AnimalID,
-          ReminderType: "Expected Calving",
-          ReferenceID: r.id,
-          DueDate: r.ExpectedCalvingDate,
-          ReminderDate: remindOn,
-          Notes: "Pre-calving check — move to maternity pen, keep a close watch.",
-          Priority: "High",
-        });
-      }
+      // The pre-calving check a dry cow needs is derived by the rule engine
+      // (DR-001 / CL-002 read ExpectedCalvingDate via the dry-off entry), so
+      // there is nothing to write here.
     });
 
     // Age promotions: on boot and whenever animals change.

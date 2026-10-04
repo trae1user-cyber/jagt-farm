@@ -143,7 +143,7 @@ JF.App = (function () {
 
   const updateBadgeCounts = async () => {
     try {
-      const reminders = (await JF.Store?.reminders?.list()) || [];
+      const reminders = (await JF.RuleEngine.live().catch(() => [])) || [];
       const pending = reminders.filter((r) => !["Completed","Dismissed"].includes(r.Status)).length;
       const badge = document.getElementById("notif-count");
       if (badge) {
@@ -196,16 +196,19 @@ JF.App = (function () {
     // verification tooling forces a reseed. A real user starts with a clean farm.
     const wantsDemo = force || new URLSearchParams(location.search).get("demo") === "1"
       || (JF.Store.getConfig("demo_data") === "1");
-    try {
-      const seeded = wantsDemo ? await JF.Seed.run({ force }) : false;
-      if (seeded) console.info("[JF] Demo data seeded.");
-    } catch (e) { console.warn("Seed failed:", e); }
+    // Demo seeding is NOT awaited. It writes hundreds of rows (milk sales alone is
+    // ~300), and awaiting it here held the sidebar and the first paint hostage -
+    // the user stared at a blank page for the whole seed. Kick it off, let the
+    // shell paint from whatever is already stored, then repaint when it lands.
+    if (wantsDemo) {
+      JF.Seed.run({ force })
+        .then((seeded) => { if (seeded) console.info("[JF] Demo data seeded."); return route(); })
+        .catch((e) => console.warn("Seed failed:", e));
+    }
 
     // Init cascade listeners
     try { JF.Cascade.init(); } catch (e) { console.warn(e); }
 
-    // Age-based calf care plan (auto deworming/vaccination reminders)
-    try { JF.CareSchedule.init(); } catch (e) { console.warn("CareSchedule init failed:", e); }
     try { JF.LifeCycle.init(); } catch (e) { console.warn("LifeCycle init failed:", e); }
     try { JF.PhaseEngine.init(); } catch (e) { console.warn("PhaseEngine init failed:", e); }
 
@@ -214,8 +217,8 @@ JF.App = (function () {
     window.addEventListener("hashchange", onHashChange);
 
     // CRITICAL: bridge adapter data-change events into the CascadeEngine pub/sub so
-    // the reminder/accounting/status subscribers actually fire. The engine must only
-    // subscribe once (double subscription would duplicate every reminder).
+    // the accounting/status subscribers actually fire. The engine must only
+    // subscribe once (double subscription would double every journal entry).
     try {
       if (!JF.Store.isBridged || !JF.Store.isBridged()) {
         JF.Store.on("change", ({ entity, action, record }) => {
@@ -226,46 +229,18 @@ JF.App = (function () {
       }
     } catch (e) { console.warn("Cascade bridge failed:", e); }
 
-    // Database-driven rule engine: loads Rules / Rule_Parameters / Rule_Overrides and
-    // recomputes every reminder from the real entries. It supersedes the fixed
-    // care plan above, so from here on the stored Rulebook drives behaviour.
-    // Runs in the BACKGROUND: boot no longer waits for it.
+    // Database-driven rule engine: loads Rules / Rule_Parameters / Rule_Overrides.
+    // Reminders are derived on read (RuleEngine.live), so nothing here writes
+    // them and there is no sweep to schedule when an entry changes.
+    // Runs in the BACKGROUND: boot does not wait for it.
     (async () => {
       try {
         const stats = await JF.RuleEngine.init();
         console.info(`[JF] Rule engine armed: ${stats.total} rules (${stats.active} active) from ${stats.source}.`);
         updateBadgeCounts();
-        // Re-evaluate only the animals touched by a new ENTRY, so saving stays fast.
-        // Reminders/rules/audit are excluded: reacting to those would make the engine
-        // re-enter itself while it is writing its own output.
-        const ENTRY_ENTITIES = new Set(["animals", "heat", "insemination", "pregnancy", "calving",
-          "health", "deworming", "vaccination", "dryOff", "death", "purchases", "sales"]);
-        // Deleting (or editing) an entry can invalidate reminders that were
-        // computed from it — e.g. a heat recorded by mistake, then removed. The
-        // server's delete reply carries no AnimalID, so a herd-wide recompute
-        // (debounced) supersedes the stale reminders instead of leaving them.
-        let resweepTimer = null;
-        const scheduleResweep = () => {
-          clearTimeout(resweepTimer);
-          resweepTimer = setTimeout(() => { JF.RuleEngine.evaluateAll().catch(() => {}); }, 2000);
-        };
-        JF.Store.on("change", ({ entity, action, record }) => {
-          if (!ENTRY_ENTITIES.has(entity)) return;
-          if (action === "create" && record) {
-            const id = record.AnimalID || (entity === "animals" ? record.id : null);
-            if (id) JF.RuleEngine.evaluateAnimal(id).catch(() => {});
-          } else if (action === "delete") {
-            scheduleResweep();
-          } else if (action === "update" && entity !== "animals" && record) {
-            const id = record.AnimalID || null;
-            if (id) JF.RuleEngine.evaluateAnimal(id).catch(() => {});
-          }
-        });
-        // Persistence: when the tab is refocused, re-read the rule configuration from
-        // the store (MongoDB when the farm API is connected) so edits made elsewhere
-        // or on another device are picked up without a manual reload. Edits made here
-        // are already written through to the database as they happen, so nothing needs
-        // flushing on hide.
+        // When the tab is refocused, re-read the rule configuration from the
+        // store so edits made elsewhere (or on another device) are picked up
+        // without a manual reload.
         document.addEventListener("visibilitychange", () => {
           if (document.visibilityState === "visible") JF.RuleEngine.focus().catch(() => {});
         });
@@ -281,6 +256,13 @@ JF.App = (function () {
       const fab = document.getElementById("fab-quick");
       if (fab) fab.addEventListener("click", () => JF.QuickEntry.openPicker());
     } catch (e) {}
+
+    // Cross-department connection web: every write ripples live through the
+    // apps that read the same entity - the animal the Reproduction lists, the
+    // Journal, the Dashboard head and the sidebar counts all stay in sync without
+    // a full reload. Wired AFTER the cascade bridge so it reacts to cascaded writes,
+    // not the source mutation that the bridge already cosumes.
+    try { JF.Departments.init(); } catch (e) { console.warn("DepartmentHub init failed:", e); }
 
     // First render NOW: the shell (sidebar + topbar) exists, so the dashboard
     // paints immediately from the adapter's warm cache while the rule engine

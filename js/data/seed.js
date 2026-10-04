@@ -497,7 +497,16 @@ JF.Seed = (function () {
     const posPregIds = new Set(pregnancies.filter((p) => p.Result === "Positive").map((p) => p.AnimalID));
     animals.forEach((a) => { if (posPregIds.has(a.AnimalID)) a.CurrentStatus = "Pregnant"; });
 
-    await JF.Store.clearAll();
+    // Wipe first so a forced reseed doesn't double up. The server refuses "clear"
+    // without an ADMIN_TOKEN the browser must never hold, so on a live Mongo farm
+    // this routinely fails - that is NOT fatal. Seeding is additive (run() already
+    // bails out above when the herd is already populated), so log and carry on
+    // rather than aborting the whole demo farm behind one refused destructive call.
+    try {
+      await JF.Store.clearAll();
+    } catch (e) {
+      console.info("[Seed] Server-side wipe unavailable (it needs the server ADMIN_TOKEN) - seeding into the existing data instead.");
+    }
     // Suppress cascade side effects while bulk-seeding: reminders/journal entries are
     // pre-baked in the seed itself and must not be duplicated by the cascade engine.
     if (JF.Cascade?.suspend) JF.Cascade.suspend();

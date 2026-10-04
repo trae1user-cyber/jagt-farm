@@ -35,18 +35,13 @@ JF.Cascade = (function () {
     catch { return def; }
   };
 
-  const makeReminder = async (base) => JF.Store.reminders.create({
-    Status: "Upcoming",
-    Priority: "Normal",
-    CreatedAt: new Date().toISOString(),
-    ...base,
-  });
+  
 
   // Update animal status by AnimalID regardless of the adapter's internal record id
   // (adapter-generated records have id != AnimalID; seed records alias the two).
   const setAnimalStatus = async (animalId, status) => {
     const animals = await JF.Store.animals.list();
-    const a = animals.find((x) => x.AnimalID === animalId || x.id === animalId);
+    const a = JF.Utils.findAnimal(animals, animalId);
     if (!a) return false;
     await JF.Store.animals.update(a.id, { CurrentStatus: status, UpdatedAt: new Date().toISOString() });
     return true;
@@ -108,15 +103,19 @@ JF.Cascade = (function () {
       }
       if (calfId && c.AnimalID) {
         const animals = await JF.Store.animals.list();
-        const exists = animals.find((a) => a.AnimalID === calfId || a.id === calfId);
+        const exists = JF.Utils.findAnimal(animals, calfId);
         if (!exists) {
-          const mother = animals.find((a) => a.AnimalID === c.AnimalID || a.id === c.AnimalID);
+          // Resolve the mother by any alias so the calf inherits parents even
+          // when the calving was logged against a typed name.
+          const mother = JF.Utils.findAnimal(animals, c.AnimalID);
           await JF.Store.animals.create({
             id: calfId, AnimalID: calfId, Name: c.CalfName || calfId, TagNumber: null,
             Species: mother?.Species || "Cattle", Breed: mother?.Breed || null,
             Gender: c.CalfGender || "Female",          DateOfBirth: c.Date || c.CalvingDate,
             Category: "Calf",
-            CurrentStatus: "Calf", MotherID: c.AnimalID,
+            // Link to the mother's canonical AnimalID when she is a farm animal,
+            // otherwise keep the name that was typed on the calving entry.
+            CurrentStatus: "Calf", MotherID: (mother && (mother.AnimalID || mother.id)) || c.AnimalID,
             // Pedigree: the sire recorded on the calving entry wins (farm bull ID
             // or a custom name); fall back to the mother's own recorded sire.
             FatherID: c.SireID || mother?.FatherID || null,
@@ -140,137 +139,92 @@ JF.Cascade = (function () {
     }
   });
 
-  // (2) REMINDERS
-  // When the sheet-driven RuleEngine is loaded it owns reminder generation (its
-  // rules live in the Rules sheet). These handlers remain as the fallback for the
-  // case where the engine could not load, so reminders are never silently lost.
-  const engineOwnsReminders = () => !!(JF.RuleEngine && JF.RuleEngine.isEnabled && JF.RuleEngine.isEnabled());
-
-  on("heat:created", async (heat) => {
-    if (engineOwnsReminders()) return;
-    if (!heat.AnimalID || !heat.HeatDate) return;
-    const expCyc = await getCfg("ExpectedCycleLength", 21);
-    const minCyc = await getCfg("MinimumCycleLength", 18);
-    const maxCyc = await getCfg("MaximumCycleLength", 24);
-    const before = await getCfg("ReminderDaysBefore", 3);
-    const base = JF.Utils.addDays(heat.HeatDate, 0);
-    const minDue = JF.Utils.addDays(base, minCyc);
-    const maxDue = JF.Utils.addDays(base, maxCyc);
-    const remDate = JF.Utils.addDays(base, Math.max(expCyc - before, 1));
-    await makeReminder({
-      ReminderID: `RMN-HEAT-${JF.Utils.uid("h")}`,
-      AnimalID: heat.AnimalID,
-      ReminderType: "Heat Expected",
-      ReferenceID: heat.id,
-      DueDate: JF.Utils.formatDate(minDue, "yyyy-MM-dd"),
-      ReminderDate: JF.Utils.formatDate(remDate, "yyyy-MM-dd"),
-      Notes: `Expected heat window ${JF.Utils.formatDate(minDue)} – ${JF.Utils.formatDate(maxDue)}`,
-      Priority: "High",
-    });
-  });
-
-  on("insemination:created", async (ai) => {
-    if (engineOwnsReminders()) return;
-    if (!ai.AnimalID || !ai.Date) return;
-    const aiDays = await getCfg("AIPregnancyCheckDays", 30);
-    const check = JF.Utils.addDays(ai.Date, aiDays);
-    await makeReminder({
-      ReminderID: `RMN-PREG-${JF.Utils.uid("p")}`,
-      AnimalID: ai.AnimalID,
-      ReminderType: "Pregnancy Check",
-      ReferenceID: ai.id,
-      DueDate: JF.Utils.formatDate(check, "yyyy-MM-dd"),
-      ReminderDate: JF.Utils.formatDate(JF.Utils.addDays(check, -2), "yyyy-MM-dd"),
-      Notes: `AI on ${JF.Utils.formatDate(ai.Date)}. Check pregnancy on day ${aiDays}.`,
-      Priority: "High",
-    });
-    // Expected calving reminder: Date + 283 days
-    const gest = await getCfg("GestationDays", 283);
-    const calving = JF.Utils.addDays(ai.Date, gest);
-    const alerts = await getCfg("CalvingAlertDays", [90, 60, 30, 14, 7, 1]);
-    for (const days of alerts) {
-      const d = JF.Utils.addDays(calving, -days);
-      await makeReminder({
-        ReminderID: `RMN-CAL-${days}-${JF.Utils.uid("c")}`,
-        AnimalID: ai.AnimalID,
-        ReminderType: "Expected Calving",
-        ReferenceID: ai.id,
-        DueDate: JF.Utils.formatDate(calving, "yyyy-MM-dd"),
-        ReminderDate: JF.Utils.formatDate(d, "yyyy-MM-dd"),
-        Notes: `${days} days before expected calving.`,
-        Priority: days <= 7 ? "High" : "Normal",
-      });
-    }
-  });
+  // (2) NEXT-DUE STAMPS + ACCOUNTING
+  // Reminders themselves are derived by RuleEngine.live() on read — nothing here
+  // writes them. What remains is stamping a next-due date back onto the entry
+  // itself (so the profile can show it) and firing the accounting cascade.
 
   on("deworming:created", async (d) => {
     if (!d.AnimalID || !d.Date) return;
     const intv = await getCfg("DewormingIntervalDays", 90);
-    const before = await getCfg("DewormingReminderBefore", 7);
     const next = JF.Utils.addDays(d.Date, intv);
-    const rem = JF.Utils.addDays(next, -before);
-    // Stamp the computed next-due back onto the deworming record (spec TR-19.1)
     if (d.id && !d.NextDueDate) {
       try { await JF.Store.deworming.update(d.id, { NextDueDate: JF.Utils.formatDate(next, "yyyy-MM-dd") }); } catch (e) {}
     }
-    if (engineOwnsReminders()) { if (d.Cost) fire("accounting:autoCreate", { kind: "deworming", record: d }); return; }
-    await makeReminder({
-      ReminderID: `RMN-DEW-${JF.Utils.uid("dw")}`,
-      AnimalID: d.AnimalID,
-      ReminderType: "Deworming",
-      ReferenceID: d.id,
-      DueDate: JF.Utils.formatDate(next, "yyyy-MM-dd"),
-      ReminderDate: JF.Utils.formatDate(rem, "yyyy-MM-dd"),
-      Notes: `Next deworming (${d.Medicine || "dewormer"})`,
-      Priority: "Normal",
-    });
     if (d.Cost) fire("accounting:autoCreate", { kind: "deworming", record: d });
   });
 
   on("vaccination:created", async (v) => {
-    if (!v.AnimalID) return;
-    if (engineOwnsReminders()) { if (v.Cost) fire("accounting:autoCreate", { kind: "vaccination", record: v }); return; }
-    if (v.NextDueDate) {
-      const before = await getCfg("VaccinationReminderBefore", 7);
-      const rem = JF.Utils.addDays(v.NextDueDate, -before);
-      await makeReminder({
-        ReminderID: `RMN-VAC-${JF.Utils.uid("v")}`,
-        AnimalID: v.AnimalID,
-        ReminderType: "Vaccination",
-        ReferenceID: v.id,
-        DueDate: JF.Utils.formatDate(v.NextDueDate, "yyyy-MM-dd"),
-        ReminderDate: JF.Utils.formatDate(rem, "yyyy-MM-dd"),
-        Notes: `Vaccine: ${v.Vaccine || ""}`,
-        Priority: "Normal",
-      });
-    }
     if (v.Cost) fire("accounting:autoCreate", { kind: "vaccination", record: v });
   });
 
   on("health:created", async (h) => {
-    if (h.FollowUpDate && h.AnimalID && !engineOwnsReminders()) {
-      await makeReminder({
-        ReminderID: `RMN-FUP-${JF.Utils.uid("f")}`,
-        AnimalID: h.AnimalID,
-        ReminderType: "Treatment Follow-up",
-        ReferenceID: h.id,
-        DueDate: JF.Utils.formatDate(h.FollowUpDate, "yyyy-MM-dd"),
-        ReminderDate: JF.Utils.formatDate(JF.Utils.addDays(h.FollowUpDate, -1), "yyyy-MM-dd"),
-        Notes: h.Problem ? `Follow-up: ${h.Problem}` : "Scheduled follow-up",
-        Priority: "High",
-      });
-    }
     if (h.TreatmentCost) fire("accounting:autoCreate", { kind: "health", record: h });
   });
 
-  // (3) ACCOUNTING double-entry journal creation
+  // (3) ACCOUNTING double-entry journal creation.
+  // Every department that spends or earns money posts here, so Finance and the
+  // Dashboard head always agree with the operational entry that caused it.
   const mapping = {
-    health:      { dr: "Veterinary Expense", cr: "Cash" },
-    deworming:   { dr: "Deworming Expense",  cr: "Cash" },
-    vaccination: { dr: "Vaccination Expense",cr: "Cash" },
-    purchases:   { dr: "Livestock",          cr: "Cash" },
-    sales:       { dr: "Cash",               cr: "Cattle Sales" },
+    health:       { dr: "Veterinary Expense",  cr: "Cash" },
+    deworming:    { dr: "Deworming Expense",   cr: "Cash" },
+    vaccination:  { dr: "Vaccination Expense", cr: "Cash" },
+    // Reproduction: an AI costs money the moment it is recorded (AI-018).
+    insemination: { dr: "Veterinary Expense",  cr: "Cash" },
+    ai:           { dr: "Veterinary Expense",  cr: "Cash" },
+    purchases:    { dr: "Livestock",           cr: "Cash" },
+    sales:        { dr: "Cash",                cr: "Cattle Sales" },
   };
+
+  // The cash/bank side follows the payment method everywhere (UPI/Card/UPI → Bank), so
+  // the Cash Book only moves when cash actually moved.
+  const payAccountOf = (method) => ({ "Bank Transfer": "Bank", Cheque: "Bank", UPI: "Bank", Card: "Bank", Cash: "Cash" }[method] || "Cash");
+
+  /**
+   * Post one journal row for a cost-bearing entry. Idempotent per source record:
+   * if a row for this record already exists (a re-run, a sync, a duplicate
+   * event) it is updated instead of doubled, so Finance can never drift.
+   */
+  const postCost = async (kind, record, amount, description) => {
+    if (!record) return false;
+    const m = mapping[kind];
+    const amt = Number(amount || 0);
+    if (!m || !(amt > 0)) return false;
+    const journal = await JF.Store.journal.list();
+    const dupe = journal.find((j) => j.ReferenceID && String(j.ReferenceID) === String(record.id) && j.TransactionType === kind);
+    if (dupe) {
+      if (Number(dupe.Amount) !== amt) {
+        await JF.Store.journal.update(dupe.id, { Amount: amt, Date: record.Date || record.DateGiven || dupe.Date, Description: description || dupe.Description });
+      }
+      return false;
+    }
+    await makeJournal({
+      JournalID: `JNL-${JF.Utils.uid("j")}`,
+      Date: record.Date || record.DateGiven || JF.Utils.todayISO(),
+      ReferenceID: record.id,
+      TransactionType: kind,
+      Description: description || `${kind} for ${record.AnimalName || record.AnimalID || ""}`,
+      DebitAccount: m.dr,
+      CreditAccount: payAccountOf(record.PaymentMethod) || m.cr,
+      Amount: amt,
+      AnimalID: record.AnimalID || null,
+      AnimalName: record.AnimalName || null,
+      PaymentMethod: record.PaymentMethod || "Cash",
+    });
+    return true;
+  };
+
+  // Reproduction → Finance: insemination cost (AI-018). Fires for the modern
+  // "insemination" entity and the legacy "ai" collection alike, and on edit so
+  // correcting the price moves Finance with it.
+  on("insemination:created", async (ai) => { if (Number(ai?.Cost)) await postCost("insemination", ai, ai.Cost); });
+  on("insemination:updated", async (ai) => { if (ai && Number(ai.Cost)) await postCost("insemination", ai, ai.Cost); });
+
+  // Corrections: if a cost is edited on an existing entry, keep the journal row
+  // in step instead of leaving the old amount behind.
+  on("health:updated", async (h) => { if (h && Number(h.TreatmentCost)) await postCost("health", h, h.TreatmentCost); });
+  on("deworming:updated", async (d) => { if (d && Number(d.Cost)) await postCost("deworming", d, d.Cost); });
+  on("vaccination:updated", async (v) => { if (v && Number(v.Cost)) await postCost("vaccination", v, v.Cost); });
 
   on("accounting:autoCreate", async ({ kind, record }) => {
     const m = mapping[kind];
@@ -349,5 +303,5 @@ JF.Cascade = (function () {
   const suspend = () => { suspended = true; };
   const resume = () => { suspended = false; };
   const isSuspended = () => suspended;
-  return { publish, subscribe, on, init, fire, makeReminder, makeJournal, suspend, resume, isSuspended };
+  return { publish, subscribe, on, init, fire, makeJournal, suspend, resume, isSuspended };
 })();

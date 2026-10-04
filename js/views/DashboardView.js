@@ -106,7 +106,7 @@ JF.Views.Dashboard = (function () {
     let data = {}, reminders = [], animals = [];
     try {
       data = JF.Store?.stats?.herd ? await JF.Store.stats.herd() : {};
-      reminders = (await JF.Store.reminders?.list()) || [];
+      reminders = (await JF.RuleEngine.live().catch(() => [])) || [];
       animals = (await JF.Store.animals?.list()) || [];
     } catch (e) { console.warn("Dashboard data:", e); }
 

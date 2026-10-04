@@ -134,22 +134,18 @@ JF.Views.Rules = (function () {
       render(["overview"]);
     });
 
-    const evalBtn = JF.Utils.el("button", { class: "btn btn--primary btn--sm", type: "button" }, "Re-evaluate all animals");
-    evalBtn.onclick = run(evalBtn, async () => {
-      const r = await JF.RuleEngine.evaluateAll();
-      msg(status, `${r.animals} animals evaluated — ${r.created} new, ${r.updated} recalculated, ${r.completed} completed.`);
+    // Reminders are derived on read, so there is nothing to rebuild or evaluate -
+    // this just reports what the current rules produce for the herd.
+    const previewBtn = JF.Utils.el("button", { class: "btn btn--primary btn--sm", type: "button" }, "Preview live reminders");
+    previewBtn.onclick = run(previewBtn, async () => {
+      const rows = await JF.RuleEngine.live({ fresh: true });
+      const open = rows.filter((r) => !["Completed", "Dismissed"].includes(r.Status));
+      const overdue = open.filter((r) => r.Status === "Overdue");
+      msg(status, `${open.length} open reminder(s) in the next ${JF.RuleEngine.horizonDays} days (${overdue.length} overdue), computed live from ${s.total} rules — nothing saved.`);
       render(["overview"]);
     });
 
-    const rebuildBtn = JF.Utils.el("button", { class: "btn btn--danger btn--sm", type: "button" }, "Rebuild reminders from entries");
-    rebuildBtn.onclick = run(rebuildBtn, async () => {
-      if (!confirm("Delete every existing reminder and regenerate them from the entries on file?\n\nThis removes manual reminders too.")) return;
-      const r = await JF.RuleEngine.rebuild();
-      msg(status, `Deleted ${r.removed} old reminder(s) and regenerated ${r.created} from ${r.animals} animals' entries.`);
-      render(["overview"]);
-    });
-
-    wrap.appendChild(JF.Utils.el("div", { style: "display:flex;gap:10px;flex-wrap:wrap;margin-top:16px" }, [installBtn, reloadBtn, evalBtn, rebuildBtn]));
+    wrap.appendChild(JF.Utils.el("div", { style: "display:flex;gap:10px;flex-wrap:wrap;margin-top:16px" }, [installBtn, reloadBtn, previewBtn]));
     wrap.appendChild(status);
 
     const cats = Object.entries(s.byCategory).sort((a, b) => b[1] - a[1]);

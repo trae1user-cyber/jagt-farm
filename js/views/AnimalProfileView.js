@@ -97,9 +97,31 @@ JF.Views.AnimalProfile = (function () {
   let activeIdx = 0;
 
   /* ---------- Helpers ---------- */
-  const rows = (entity, dateKey) => (cache[entity] || [])
-    .filter((r) => r.AnimalID === aID)
-    .sort((x, y) => new Date(y[dateKey] || 0) - new Date(x[dateKey] || 0));
+  // Alias-aware record matching. Records can reference this animal by AnimalID,
+  // by a name the farmer typed ("dabbi"), by tag, or by the adapter's internal
+  // id — so a calving logged against a name still fills the Calving tab and the
+  // overview counts instead of showing "no data".
+  const rows = (entity, dateKey = "Date") => (cache[entity] || [])
+    .filter((r) => JF.Utils.recordBelongsTo(r, cache.animal, {
+      idKey: "AnimalID",
+      also: ["AnimalID", "AnimalName", "MotherID", "FatherID", "CalfID", "id"],
+    }))
+    .sort((x, y) => (JF.Utils.dateKey(y[dateKey]) || 0) - (JF.Utils.dateKey(x[dateKey]) || 0));
+
+  // One predicate for every section: does a record belong to the open animal?
+  // Used by the journal, files, expenses, accounting, reminders and episodes
+  // tabs so they never show "no data" for an animal whose records were logged
+  // against a typed name or a diverged id.
+  const belongs = (rec) => JF.Utils.recordBelongsTo(rec, cache.animal, {
+    idKey: "AnimalID", also: ["AnimalID", "AnimalName", "MotherID", "FatherID", "CalfID", "id"],
+  });
+
+  // Every animal on the farm (from the life-cycle data window) for relationship lookups.
+  const allAnimals = () => (cache.lifeCycleData && cache.lifeCycleData.animals) || [];
+  const animalLabel = (ref) => {
+    const hit = JF.Utils.findAnimal(allAnimals(), ref);
+    return hit ? (hit.Name || hit.AnimalID) : (ref || "—");
+  };
 
   const emptyCard = (msg) => JF.Utils.el("div", { class: "card", style: { padding: "var(--space-7)", textAlign: "center" } },
     JF.Utils.el("div", { class: "search-empty" }, [
@@ -125,11 +147,14 @@ JF.Views.AnimalProfile = (function () {
   const overviewTab = () => {
     const heats = rows("heat", "HeatDate"), preg = rows("pregnancy", "Date"), calv = rows("calving", "Date");
     const healths = rows("health", "Date"), dew = rows("deworming", "Date"), vax = rows("vaccination", "DateGiven");
-    const jnl = (cache.journal || []).filter((e) => e.AnimalID === aID);
+    const jnl = (cache.journal || []).filter(belongs);
     const spend = jnl.filter((e) => (e.DebitAccount || "").includes("Expense")).reduce((s, e) => s + Number(e.Amount || 0), 0);
     const a = cache.animal;
     const posPreg = preg.filter((p) => p.Result === "Positive").length;
     const lastCalv = calv[0];
+    // Offspring on the farm: any animal whose MotherID/FatherID points back here.
+    const offspringCount = allAnimals().filter((x) =>
+      JF.Utils.sameAnimal(a, x.MotherID) || JF.Utils.sameAnimal(a, x.FatherID)).length;
 
     // Life-cycle card (derived from records by the LifeCycle engine)
     let lc = null;
@@ -138,6 +163,18 @@ JF.Views.AnimalProfile = (function () {
     const info = (k, v) => JF.Utils.el("div", { style: { display: "flex", justifyContent: "space-between", gap: "12px", padding: "8px 0", borderBottom: "1px solid var(--color-ink-100)" } }, [
       JF.Utils.el("span", { class: "field__hint" }, k), JF.Utils.el("span", { style: { fontWeight: 600, textAlign: "right" } }, v || "—"),
     ]);
+    // A relationship row that links to the relative's own profile (falling back
+    // to the name the farmer typed, then the raw reference).
+    const relInfo = (k, ref, nameOnly) => {
+      const hit = JF.Utils.findAnimal(allAnimals(), ref);
+      const label = hit ? `${hit.Name || hit.AnimalID} (${hit.AnimalID || hit.id})` : (nameOnly || ref || "—");
+      const val = hit
+        ? JF.Utils.el("a", { href: `#animal/${hit.AnimalID || hit.id}`, style: { fontWeight: 600, color: "var(--color-accent-700)" } }, label)
+        : JF.Utils.el("span", { style: { fontWeight: 600 } }, label);
+      return JF.Utils.el("div", { style: { display: "flex", justifyContent: "space-between", gap: "12px", padding: "8px 0", borderBottom: "1px solid var(--color-ink-100)" } }, [
+        JF.Utils.el("span", { class: "field__hint" }, k), val,
+      ]);
+    };
 
     return JF.Utils.el("div", { class: "grid grid--cols-3", style: { gap: "var(--space-4)" } }, [
       JF.Utils.el("div", { class: "card" }, [
@@ -148,12 +185,15 @@ JF.Views.AnimalProfile = (function () {
       ]),
       JF.Utils.el("div", { class: "card" }, [
         JF.Utils.el("div", { class: "card__eyebrow" }, "PEDIGREE & PURCHASE"),
-        info("Mother", a?.MotherID || "—"),
-        info("Father", a?.FatherID || "—"),
+        relInfo("Mother (dam)", a?.MotherID, a?.MotherName),
+        relInfo("Father (sire)", a?.FatherID, a?.SireName),
+        offspringCount != null ? info("Offspring on farm", String(offspringCount)) : null,
         info("Purchase Date", JF.Utils.formatDate(a?.PurchaseDate)),
         info("Purchase Price", a?.PurchasePrice ? money(a.PurchasePrice) : "—"),
         info("Ident. Marks", a?.IdentificationMarks),
-      ]),
+        JF.Utils.el("div", { style: { marginTop: "var(--space-3)" } },
+          JF.Utils.el("a", { class: "btn btn--ghost btn--sm", href: `#pedigree/${a?.AnimalID || aID}` }, "Open full pedigree →")),
+      ].filter(Boolean)),
       JF.Utils.el("div", { class: "card" }, [
         JF.Utils.el("div", { class: "card__eyebrow" }, "REPRODUCTION"),
         statCard("HEATS RECORDED", heats.length),
@@ -389,7 +429,7 @@ JF.Views.AnimalProfile = (function () {
 
   /* ---------- Tab: Documents ---------- */
   const documentsTab = () => {
-    const list = (cache.files || []).filter((f) => f.AnimalID === aID);
+    const list = (cache.files || []).filter(belongs);
     if (!list.length) return emptyCard("No documents linked to this animal.");
     return JF.Utils.el("div", { class: "grid grid--cols-3" }, list.map((f) => JF.Utils.el("div", { class: "card", style: { padding: "var(--space-4)" } }, [
       JF.Utils.el("div", { style: { display: "flex", gap: "10px", alignItems: "center" } }, [
@@ -428,9 +468,9 @@ JF.Views.AnimalProfile = (function () {
 
   /* ---------- Tab: Expenses ---------- */
   const expensesTab = () => {
-    const list = (cache.expenses || []).filter((e) => e.AnimalID === aID);
+    const list = (cache.expenses || []).filter(belongs);
     // Medical expenses include the auto-journaled treatment/dewormer/vaccine costs.
-    const medJnl = (cache.journal || []).filter((e) => e.AnimalID === aID && (e.DebitAccount || "").includes("Expense") && /Veterinar|Medicin|Vaccin|Deworm/i.test(e.DebitAccount));
+    const medJnl = (cache.journal || []).filter((e) => belongs(e) && (e.DebitAccount || "").includes("Expense") && /Veterinar|Medicin|Vaccin|Deworm/i.test(e.DebitAccount));
     const medFromRecords =
       rows("health", "Date").reduce((s, h) => s + Number(h.TreatmentCost || 0), 0) +
       rows("deworming", "Date").reduce((s, x) => s + Number(x.Cost || 0), 0) +
@@ -456,7 +496,7 @@ JF.Views.AnimalProfile = (function () {
 
   /* ---------- Tab: Accounting ---------- */
   const accountingTab = () => {
-    const jnl = (cache.journal || []).filter((e) => e.AnimalID === aID)
+    const jnl = (cache.journal || []).filter(belongs)
       .sort((x, y) => new Date(y.Date) - new Date(x.Date));
     const spend = jnl.filter((e) => (e.DebitAccount || "").includes("Expense")).reduce((s, e) => s + Number(e.Amount || 0), 0);
     const header = JF.Utils.el("div", { class: "grid grid--cols-4", style: { marginBottom: "var(--space-5)" } }, [
@@ -525,7 +565,7 @@ JF.Views.AnimalProfile = (function () {
     ]);
     const episodes = JF.ReproIntel.episodesFor(aID, { heats, inseminations: insem, healths, animals: cache.animals ? [cache.animal] : [] }).slice().reverse();
     const score = await JF.ReproIntel.scorecardFor(aID);
-    const memory = heatMemory(heats.filter((h) => h.AnimalID === aID), insem.filter((x) => x.AnimalID === aID));
+    const memory = heatMemory(heats.filter(belongs), insem.filter(belongs));
 
     const wrap = JF.Utils.el("div", {});
 
@@ -641,7 +681,7 @@ JF.Views.AnimalProfile = (function () {
     const lastAIRec = ais.sort((a, b) => new Date(b.Date) - new Date(a.Date))[0];
     let lastPD = null;
     if (lastAIRec) {
-      const pd = (cache.pregnancy || []).filter((p) => p.AnimalID === lastAIRec.AnimalID && JF.Utils.daysBetween(lastAIRec.Date, p.Date) >= 20).sort((a, b) => new Date(b.Date) - new Date(a.Date))[0];
+      const pd = (cache.pregnancy || []).filter((p) => belongs(p) && JF.Utils.daysBetween(lastAIRec.Date, p.Date) >= 20).sort((a, b) => new Date(b.Date) - new Date(a.Date))[0];
       lastPD = pd ? pd.Result : "pending";
     }
     return { avgCycle: avg, intervals: last3, lastAI, lastPD };
@@ -680,8 +720,8 @@ JF.Views.AnimalProfile = (function () {
     // Full data window (incl. dry-offs) for the life-cycle card.
     try { cache.lifeCycleData = await JF.LifeCycle.loadAll(); } catch (e) { cache.lifeCycleData = null; }
 
-    const reminders = ((await JF.Store.reminders.list().catch(() => [])) || [])
-      .filter((r) => r.AnimalID === aID && !["Completed", "Dismissed"].includes(r.Status))
+    const reminders = ((await JF.RuleEngine.live().catch(() => [])) || [])
+      .filter((r) => belongs(r) && !["Completed", "Dismissed"].includes(r.Status))
       .sort((x, y) => new Date(x.DueDate) - new Date(y.DueDate)).slice(0, 4);
 
     const page = JF.Utils.el("div", { class: "page" });
