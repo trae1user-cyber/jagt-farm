@@ -185,33 +185,77 @@ JF.Views.Reproduction = (function () {
       page.appendChild(calCard);
     } else {
       // heatRecords — enriched: which AI followed the heat (with its time), and
-      // the next expected heat window (heat + 18-24d cycle from parameters).
+      // the next expected heat window for the heat that is actually still open.
       const animals = (await JF.Store.animals.list()) || [];
       const nameOf = (id) => { const a = animals.find((x) => x.AnimalID === id || x.id === id); return a ? (a.Name || a.AnimalID) : (id || "—"); };
-      const aiOf = (h) => {
-        const hd = String(h.HeatDate || "");
-        if (!hd) return null;
-        return insem
-          .filter((i) => i.AnimalID === h.AnimalID && i.Date && i.Date >= hd && JF.Utils.daysBetween(hd, i.Date) <= 3)
-          .sort((a, b) => String(a.Date).localeCompare(String(b.Date)))[0] || null;
+
+      // Cycle length comes from the farm's own configuration, not a literal: the
+      // Settings screen edits MinimumCycleLength/ExpectedCycleLength/
+      // MaximumCycleLength, and the rulebook carries the same three as
+      // "Estrous minimum/average/maximum". Either source moves this table with it.
+      const cycleOf = async () => {
+        const saved = await JF.Store.settings.allMap().catch(() => ({}));
+        const byName = {};
+        (JF.RuleEngine.listParams ? JF.RuleEngine.listParams() : [])
+          .forEach((p) => { byName[String(p.Parameter || "").toLowerCase()] = p.Value; });
+        const pick = (key, ruleName, fallback) =>
+          Number(saved[key]) || Number(byName[ruleName]) || fallback;
+        return {
+          min: pick("MinimumCycleLength", "estrous minimum", 18),
+          avg: pick("ExpectedCycleLength", "estrous average", 21),
+          max: pick("MaximumCycleLength", "estrous maximum", 24),
+        };
       };
-      const cycleMin = 18, cycleAvg = 21, cycleMax = 24;
+      const { min: cycleMin, avg: cycleAvg, max: cycleMax } = await cycleOf();
       const nextWin = (hd) => {
         if (!hd) return null;
         const lo = JF.Utils.formatDate(JF.Utils.addDays(hd, cycleMin), "dd MMM");
         const mid = JF.Utils.formatDate(JF.Utils.addDays(hd, cycleAvg), "dd MMM");
         const hi = JF.Utils.formatDate(JF.Utils.addDays(hd, cycleMax), "dd MMM");
-        return `${lo} – ${hi} (aim ${mid})`;
+        return { lo, text: `${lo} – ${hi} (aim ${mid})` };
       };
+
+      // Ascending per animal, so each heat knows which heat superseded it.
+      const byAnimal = {};
+      heats.forEach((h) => { (byAnimal[h.AnimalID] = byAnimal[h.AnimalID] || []).push(h); });
+      Object.values(byAnimal).forEach((list) =>
+        list.sort((a, b) => String(a.HeatDate || "").localeCompare(String(b.HeatDate || ""))));
+
+      // An AI serves a heat when it falls between that heat and the NEXT one. A
+      // fixed 3-day window missed inseminations booked later in the same cycle and
+      // reported almost every heat as unserved.
+      const aiAfter = (h, nextHeatDate) => {
+        if (!h.HeatDate) return null;
+        return insem
+          .filter((i) => i.AnimalID === h.AnimalID && i.Date
+            && i.Date >= h.HeatDate
+            && (!nextHeatDate || i.Date < nextHeatDate))
+          .sort((a, b) => String(a.Date).localeCompare(String(b.Date)))[0] || null;
+      };
+
       const rows = heats.slice().sort((a, b) => String(b.HeatDate || "").localeCompare(String(a.HeatDate || ""))).map(h => {
-        const ai = aiOf(h);
-        const openDays = (() => {
-          if (!h.HeatDate) return null;
-          const d = JF.Utils.daysBetween(h.HeatDate, JF.Utils.todayISO());
-          if (ai) return null; // served — window closed
-          if (d < 0) return "upcoming";
-          return d;
-        })();
+        const list = byAnimal[h.AnimalID] || [];
+        const isLatest = list.indexOf(h) === list.length - 1;
+        const nextHeatDate = isLatest ? null : (list[list.indexOf(h) + 1] || {}).HeatDate || null;
+        const ai = aiAfter(h, nextHeatDate);
+        // Only the newest heat still has an open cycle, so only it gets a window;
+        // older heats show the AI that actually followed them.
+        const win = isLatest ? nextWin(h.HeatDate) : null;
+        const daysSince = h.HeatDate ? JF.Utils.daysBetween(h.HeatDate, JF.Utils.todayISO()) : null;
+
+        let served;
+        if (ai) {
+          served = `<span class="badge badge--accent">💉 AI ${JF.Utils.formatDate(ai.Date, "dd MMM")}${ai.Time ? " · " + ai.Time : ""}</span>`;
+        } else if (!isLatest) {
+          served = `<span class="field__hint">no AI before the next heat</span>`;
+        } else if (daysSince == null) {
+          served = "—";
+        } else if (daysSince < 0) {
+          served = win ? `<span class="badge badge--info">window opens ${win.lo}</span>` : "—";
+        } else {
+          served = `<span class="badge badge--warning">not served · ${daysSince}d</span>`;
+        }
+
         return {
           animalId: h.AnimalID,
           cols: [
@@ -219,12 +263,8 @@ JF.Views.Reproduction = (function () {
             `${JF.Utils.formatDate(h.HeatDate, "dd MMM yyyy")}<div class="field__hint">${h.HeatTime || ""}</div>`,
             h.DetectionMethod || "Visual",
             `<span class="badge badge--warning">${h.HeatIntensity || "Strong"}</span><div class="field__hint">${Array.isArray(h.Symptoms) ? h.Symptoms.slice(0, 2).join(", ") : (h.Symptoms || "")}</div>`,
-            ai
-              ? `<span class="badge badge--accent">💉 AI ${JF.Utils.formatDate(ai.Date, "dd MMM")}${ai.Time ? " · " + ai.Time : ""}</span>`
-              : (openDays === "upcoming"
-                  ? `<span class="badge badge--info">window opens ${nextWin(h.HeatDate).split(" – ")[0]}</span>`
-                  : openDays == null ? "—" : `<span class="badge badge--warning">not served · ${openDays}d</span>`),
-            nextWin(h.HeatDate) || "—",
+            served,
+            win ? win.text : "—",
             h.Notes || "—",
           ],
         };
@@ -232,7 +272,7 @@ JF.Views.Reproduction = (function () {
       page.appendChild(renderTable(["Animal", "Heat observed", "Detection", "Intensity & signs", "AI after this heat", "Next expected heat", "Notes"], rows));
       page.appendChild(JF.Utils.el("div", { class: "card", style: { padding: "var(--space-3)", marginTop: "var(--space-3)" } }, [
         JF.Utils.el("div", { class: "field__hint" },
-          "Next-expected window uses the 18–24 day cycle (aim for day 21). An AI recorded within 3 days after the heat closes its window automatically. Record the AI time and the Heat Detective grades the timing."),
+          `Next-expected window uses the farm's cycle settings (${cycleMin}–${cycleMax} days, aim ${cycleAvg}) and is shown only for each animal's most recent heat. Any AI recorded before that animal's next heat closes the cycle. Record the AI time and the Heat Detective grades the timing.`),
       ]));
     }
 
