@@ -67,11 +67,11 @@ lets you pin the backend to one or the other.
 
 They are not three different systems. All three end in the same place.
 
-1. **Quick Entry** — the button in the top bar. Pick one of 19 kinds of record
+1. **Quick Entry** — the button in the top bar. Pick one of 18 kinds of record
    (animal, heat, insemination, pregnancy check, calving, treatment, vaccination,
    deworming, dry-off, death, expense, milk payment, purchase, sale, photo,
    heat observation, document, custom reminder) and fill the form.
-2. **Blank Entry** (`#canvas`) — opens completely empty, shows the same 19 kinds,
+2. **Blank Entry** (`#canvas`) — opens completely empty, shows the same 18 kinds,
    and fills the form for whichever you pick. It does not have its own field
    list: it renders the *same* form Quick Entry renders, through
    `JF.QuickEntry.buildForm()`, and saves through the *same* handler,
