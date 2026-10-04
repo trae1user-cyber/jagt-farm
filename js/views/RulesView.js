@@ -155,8 +155,8 @@ JF.Views.Rules = (function () {
         cats.map(([c, n]) => JF.Utils.el("span", { class: "badge badge--info" }, `${c} · ${n}`))),
     ]));
 
-    // Where do the rules live right now? (HYBRID: sheet when configured, else
-    // the data backend; mock device store when nothing is connected.)
+    // Where do the rules live right now? (MongoDB when connected, else the
+    // device store.)
     try {
       const m = await JF.RuleEngine.mirrorStatus();
       if (mirrorLine) mirrorLine.textContent = m.home === "mongo"
@@ -216,7 +216,7 @@ JF.Views.Rules = (function () {
       [JF.Utils.el("option", { value: "" }, "All categories")].concat(cats.map((c) => JF.Utils.el("option", { value: c }, c))));
     select.onchange = () => { filter = select.value; draw(); };
     wrap.appendChild(JF.Utils.el("div", { class: "page__head-row" }, [select]));
-    wrap.appendChild(JF.Utils.el("p", { class: "field__hint" }, "Turn a rule off to stop it generating new reminders (history is kept). Lead time is the number of days before the due date that the reminder appears. Every toggle and lead time is saved into the rulebook home (Google Sheet tabs or database), so it survives refreshes and shows on your phone and PC alike."));
+    wrap.appendChild(JF.Utils.el("p", { class: "field__hint" }, "Turn a rule off to stop it generating new reminders (history is kept). Lead time is the number of days before the due date that the reminder appears. Every toggle and lead time is saved into the rulebook in your database (or on this device when offline), so it survives refreshes and shows on your phone and PC alike."));
     wrap.appendChild(host);
     draw();
     return wrap;
@@ -246,7 +246,7 @@ JF.Views.Rules = (function () {
         ]);
       })),
     ]);
-    wrap.appendChild(JF.Utils.el("p", { class: "field__hint" }, "These are the biological and farm-protocol values the rules read. Change 90 → 120 here (or directly in the Rule_Parameters tab of the Google Sheet) and every rule using it follows, with no code change."));
+    wrap.appendChild(JF.Utils.el("p", { class: "field__hint" }, "These are the biological and farm-protocol values the rules read. Change 90 → 120 here and every rule using it follows, with no code change."));
     wrap.appendChild(status);
     wrap.appendChild(JF.Utils.el("div", { class: "table-wrap" }, [table]));
     return wrap;
@@ -294,7 +294,7 @@ JF.Views.Rules = (function () {
         JF.Utils.el("td", {}, o.ApprovedBy || ""),
         JF.Utils.el("td", {}, JF.Utils.el("button", {
           class: "btn btn--ghost btn--sm", type: "button",
-          onclick: async () => { await JF.RuleEngine.removeOverride(o.id); JF.Toast.show("Override removed everywhere (app + sheet).", "success"); render(["overrides"]); },
+          onclick: async () => { await JF.RuleEngine.removeOverride(o.id); JF.Toast.show("Override removed everywhere.", "success"); render(["overrides"]); },
         }, "Delete")),
       ]))),
     ]);
@@ -341,7 +341,7 @@ JF.Views.Rules = (function () {
         JF.Utils.el("div", { class: "eyebrow" }, "🧠 Rule engine"),
         JF.Utils.el("h1", { class: "page__title", style: { marginTop: "8px" } }, SUB[sub]?.label || "Rule Engine"),
         JF.Utils.el("p", { class: "page__sub", style: { marginTop: "var(--space-2)" } },
-          "The farm's own rules, stored in your Google Sheet rulebook (or the database until a sheet is connected): entries are matched against them to produce reminders, calculations and alerts."),
+          "The farm's own rules, stored in your database (or on this device when offline): entries are matched against them to produce reminders, calculations and alerts."),
       ]),
     ]));
     page.appendChild(subNav(sub));

@@ -6,10 +6,10 @@ window.JF = window.JF || {};
  * These rows are what gets installed into the farm database (MongoDB collections
  *   Rules | Rule_Parameters | Rule_Overrides
  * by Settings > Rules > "Install default rulebook" (server action `seedRules`).
- * Once installed, the SHEET is the source of truth: change an interval, disable a
+ * Once installed, the stored rulebook is the source of truth: change an interval, disable a
  * rule or override a parameter for one animal there and the website follows it
- * without any code change. This file is only the fallback used when the sheets are
- * empty (offline / first run) and the seed payload.
+ * without any code change. This file is only the fallback used when the rulebook
+ * rows are empty (offline / first run) and the seed payload.
  *
  * Column layout matches the farm's rulebook spec, plus ParamID which links a rule
  * to the parameter that overrides its DefaultValue.

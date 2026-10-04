@@ -107,7 +107,7 @@ JF.PhotoUpload = (function () {
       const safe = remoteSafeUrl(url);
       if (!safe) {
         // Server upload failed while a live backend is configured - keep the local
-        // copy visible but never push base64 into the sheet.
+        // copy visible but never push base64 into the farm record.
         JF.Toast && JF.Toast.show("Photo kept on this device only - retry the upload when online.", "warning");
         return;
       }

@@ -21,12 +21,11 @@ window.JF = window.JF || {};
  * Persistence (why edits survive a refresh on any device):
  *   Every edit (rule toggle, lead time, parameter value, override) is written
  *   THROUGH into the rulebook home - the three entities Rules / Rule_Parameters /
- *   Rule_Overrides, which the store routes to the Google Sheet rule console when
- *   its URL is configured (HYBRID: MongoDB holds the farm DATA, the Sheet holds
- *   the RULES), and to MongoDB/this device otherwise. Every device picks changes
+ *   Rule_Overrides, stored in the same place as the farm data - MongoDB, or this
+ *   device when offline. Every device picks changes
  *   up on its next load (boot, or the moment the tab is refocused). On boot the
  *   stored rows are read FIRST and the built-in rulebook only fills rows the home
- *   has never seen - so the rulebook home, not the code, is the source of truth.
+ *   has never seen - so the stored rulebook, not the code, is the source of truth.
  */
 JF.RuleEngine = (function () {
 
@@ -51,15 +50,14 @@ JF.RuleEngine = (function () {
   /* ------------------------------------------------------------------ */
 
   /**
-   * There is no secondary mirror: the store routes the three rule entities to
-   * their home (Google Sheet when configured, else the data adapter), so one
-   * write-through is the whole story. See Store.js makeComposite().
+   * There is no secondary mirror: the three rule entities live in the same
+   * backend as the farm data, so one write-through is the whole story.
    */
 
   const load = async () => {
     const book = BOOK();
     // Built-in rulebook is the default LAYER; every row present in the rulebook
-    // home (Google Sheet tabs, MongoDB collections or the device store) overrides
+    // home (MongoDB collections or the device store) overrides
     // it. Partial installs and single-row edits therefore never drop the rest.
     const merge = (base, overlay, key) => {
       const map = new Map();
@@ -71,7 +69,7 @@ JF.RuleEngine = (function () {
       });
       return [...map.values()];
     };
-    let sheetRules = 0, sheetParams = 0, autoInstalled = 0;
+    let storedRules = 0, storedParams = 0, autoInstalled = 0;
     try {
       // Each rule entity degrades independently: a 400 on one collection
       // (old server version, entity not deployed yet) must not fall back to
@@ -81,10 +79,8 @@ JF.RuleEngine = (function () {
         safeList(JF.Store.rules.list()), safeList(JF.Store.ruleParameters.list()), safeList(JF.Store.ruleOverrides.list()),
       ]);
       // First connection: the rulebook home exists but is empty. Install the
-      // built-in rulebook once, so the home (sheet tabs or database collections)
-      // becomes the source of truth from day one and every later device boots
-      // from the same rows. Bulk seed where available (sheet/Mongo), else one
-      // create per row through the store.
+      // built-in rulebook once, so the database becomes the source of truth from
+      // day one and every later device boots from the same rows.
       if (!(rRows || []).length && !(pRows || []).length) {
         try {
           // A remote backend with a bulk seed gets one server call; otherwise rows
@@ -95,8 +91,8 @@ JF.RuleEngine = (function () {
             const s = await ad.seedRules(BOOK().seedPayload());
             res = { rules: (s && s.rules && (s.rules.added || s.rules.updated)) || 0, params: (s && s.parameters && (s.parameters.added || s.parameters.updated)) || 0 };
           }
-          // A home without a bulk seed (device store, or a cold sheet fallback)
-          // reports zero counts: install row-by-row through the store instead.
+          // A home without a bulk seed (the device store) reports zero counts:
+          // install row-by-row through the store instead.
           if (!res || (!res.rules && !res.params)) res = await installDefaults();
           autoInstalled = (res.rules || 0) + (res.params || 0);
           const [r2, p2] = await Promise.all([JF.Store.rules.list(), JF.Store.ruleParameters.list()]);
@@ -105,10 +101,10 @@ JF.RuleEngine = (function () {
         } catch (e) { console.warn("[RuleEngine] auto-install into the database failed:", e.message); }
       }
       rules = merge(book.RULES, (rRows || []).map((x) => ({ ...x, Active: truthy(x.Active) })), "RuleID");
-      sheetRules = (rRows || []).length;
+      storedRules = (rRows || []).length;
       const mergedParams = merge(book.PARAMS, pRows || [], "ParameterID");
       params = Object.fromEntries(mergedParams.map((x) => [String(x.ParameterID), x]));
-      sheetParams = (pRows || []).length;
+      storedParams = (pRows || []).length;
       overrides = (oRows || []).filter((x) => truthy(x.Active));
     } catch (e) {
       console.warn("[RuleEngine] stored rule rows unreadable, using built-in rulebook:", e.message);
@@ -117,9 +113,9 @@ JF.RuleEngine = (function () {
       overrides = [];
     }
     const home = (JF.Store.homeOf && JF.Store.homeOf("rules")) || "device";
-    const homeName = home === "sheet" ? "Google Sheet rulebook" : home === "mongo" ? "MongoDB" : "this device";
-    loadSource = sheetRules || sheetParams
-      ? `${homeName} (${sheetRules} rule rows, ${sheetParams} parameter rows) overriding the built-in rulebook`
+    const homeName = home === "mongo" ? "MongoDB" : "this device";
+    loadSource = storedRules || storedParams
+      ? `${homeName} (${storedRules} rule rows, ${storedParams} parameter rows) overriding the built-in rulebook`
       : "built-in rulebook";
     loadedAt = new Date().toISOString();
     return { rules: rules.length, params: Object.keys(params).length, overrides: overrides.length, source: loadSource, home, autoInstalled };
@@ -127,7 +123,7 @@ JF.RuleEngine = (function () {
 
   const ensureLoaded = async () => { if (!loadedAt) await load(); };
 
-  /** Install the built-in rulebook into the sheets (only adds what is missing). */
+  /** Install the built-in rulebook into the database (only adds what is missing). */
   const installDefaults = async () => {
     const book = BOOK();
     const [rRows, pRows] = await Promise.all([JF.Store.rules.list(), JF.Store.ruleParameters.list()]);
@@ -800,8 +796,8 @@ JF.RuleEngine = (function () {
   /* ------------------------------------------------------------------ */
 
   /**
-   * Every edit goes through the store, so it lands in the rulebook home - the
-   * Google Sheet tabs when configured, otherwise MongoDB or the device store.
+   * Every edit goes through the store, so it lands in the rulebook home - MongoDB,
+   * or the device store when offline.
    * The engine reads through the same store, so it never talks to an adapter
    * directly (that would re-enter itself via the change events).
    */
@@ -871,7 +867,7 @@ JF.RuleEngine = (function () {
    * mode). Covers the reverse path of load(): rules edited while this device was
    * offline, or a rulebook shipped with a newer app version, reach the home here.
    * Existing rows are updated field-by-field; rows the payload does not carry are
-   * kept - so a farm-wide Sheet edit and a device edit can both survive.
+   * kept - so a farm-wide edit and a device edit can both survive.
    */
   const listRules = () => rules.map((x) => ({ ...x }));
   const listParams = () => Object.values(params).map((x) => ({ ...x }));
