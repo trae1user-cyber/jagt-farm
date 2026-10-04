@@ -107,6 +107,7 @@ JF.PhaseEngine = (function () {
     const delta = Math.round(value - booked);
     if (Math.abs(delta) < 1) return false;
     const ref = `PHASE-REVAL-${id}-${mine.length + 1}-${String(phase).replace(/\s+/g, "")}`;
+    if (mine.some((j) => j.ReferenceID === ref)) return false; // already posted
     const up = delta > 0; // up: Dr Livestock / Cr Owner Capital; down: reversed
     await JF.Store.journal.create({
       JournalID: `JNL-${JF.Utils.uid("j")}`,
@@ -163,8 +164,19 @@ JF.PhaseEngine = (function () {
     return fixed;
   };
 
-  /** Sync phases (and asset values) for the whole herd. Returns change count. */
-  const syncAll = async () => {
+  /**
+   * Sync phases (and asset values) for the whole herd. Returns change count.
+   * Only one pass runs at a time: two overlapping passes would each read the
+   * journal before the other's rows landed and post the same revaluation twice.
+   */
+  let inflight = null;
+  const syncAll = () => {
+    if (inflight) return inflight;
+    inflight = run().finally(() => { inflight = null; });
+    return inflight;
+  };
+
+  const run = async () => {
     const d = {
       animals: await JF.Store.animals.list(),
       calving: await JF.Store.calving.list(),
