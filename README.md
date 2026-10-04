@@ -244,10 +244,29 @@ manual step that has not been performed.
 
 ## Conventions worth knowing before you change something
 
-- **One place per value.** Phase and asset value belong to `PhaseEngine`. The
-  ledger belongs to `CascadeEngine.post`. Reminders belong to `RuleEngine.live`.
-  If you find yourself writing the same number in two files, one of them is
-  wrong.
+### Who owns what
+
+Three concerns, three files. Open the one that owns the thing you are changing.
+
+| Concern | Owner | Entry point |
+| --- | --- | --- |
+| Reminders — what is due, and when | `js/modules/RuleEngine.js` | `live()` derives them; nothing is written |
+| An animal's **phase** and its **value** | `js/modules/PhaseEngine.js` | `phaseOf()` (pure), `syncAll()` (the sweep) |
+| The **ledger** — every journal row | `js/modules/CascadeEngine.js` | `post()` for records, `bookValuation()` / `forgetValuation()` for phase values |
+
+The rule that makes this hold: **a module that decides something must not be the
+module that books it.** PhaseEngine works out that an animal is worth ₹1,50,000;
+it then asks `CascadeEngine.bookValuation()` to book it, because the ledger
+already has one owner for every row it writes — `post()` for operational
+records, `bookValuation()` for asset values. Dependence runs one way:
+PhaseEngine → CascadeEngine → Store. Nothing in the ledger reads a phase.
+
+- **One place per value.** Phase and asset value belong to `PhaseEngine`; the
+  rows that record them belong to `CascadeEngine`. Animal tags belong to
+  `JF.Utils.nextAnimalId()`. Form shapes and their save handlers belong to
+  `JF.QuickEntry`, which the Blank Entry canvas calls rather than copies. If you
+  find yourself writing the same number or the same field list in two files, one
+  of them is wrong.
 - **No generated reminder rows.** If you add a feature that needs to "remember"
   a reminder, store the decision, not the reminder.
 - **Deletes are real.** `Store.delete()` takes the record **id**, not a

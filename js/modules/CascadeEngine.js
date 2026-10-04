@@ -153,9 +153,73 @@ JF.Cascade = (function () {
     }
   });
 
+  /* ---------- Animal valuation (the ledger side of a phase change) ----------
+   * PhaseEngine decides the VALUE of an animal's phase; booking it is ledger
+   * work, so it lives here with every other journal row this engine writes.
+   * Two ways in — bookValuation() when the value changes, forgetValuation() when
+   * the animal is deleted. Both are idempotent and keyed on the animal's tag. */
+
+  /** Animals deleted this session: never valued, never booked again. */
+  const dropped = new Set();
+
+  /**
+   * Keep the Livestock asset for this animal EQUAL to the phase value. The
+   * delta booked = phase value − what the JOURNAL already carries for this
+   * animal, i.e. its own prior revaluation rows. Booked is read from the ledger
+   * and never from animal.PurchasePrice: a price the farmer typed is not a
+   * rupee in the ledger until something posts it, and counting it as booked
+   * made every purchased animal post a write-down that the next sweep had to
+   * reverse — the pair cancelled out and the ledger drifted away from the
+   * profile. Each Calf→Preg Heifer→Cow step-up still books only its step.
+   */
+  const bookValuation = async (animal, value, phase) => {
+    const id = animal.AnimalID || animal.id;
+    if (dropped.has(id)) return false; // deleted, possibly mid-sweep
+    const journal = await JF.Store.journal.list();
+    const mine = journal.filter((j) => j.ReferenceID && String(j.ReferenceID).startsWith(`PHASE-REVAL-${id}-`));
+    const booked = mine.reduce((s, j) => s + (j.CreditAccount === "Livestock" ? -Number(j.Amount || 0) : Number(j.Amount || 0)), 0);
+    const delta = Math.round(value - booked);
+    if (Math.abs(delta) < 1) return false;
+    const ref = `PHASE-REVAL-${id}-${mine.length + 1}-${String(phase).replace(/\s+/g, "")}`;
+    if (mine.some((j) => j.ReferenceID === ref)) return false; // already booked
+    const up = delta > 0; // up: Dr Livestock / Cr Owner Capital; down: reversed
+    await JF.Store.journal.create({
+      JournalID: `JNL-${JF.Utils.uid("j")}`,
+      Date: JF.Utils.todayISO(),
+      DebitAccount: up ? "Livestock" : "Owner Capital",
+      CreditAccount: up ? "Owner Capital" : "Livestock",
+      Amount: Math.abs(delta),
+      AnimalID: id,
+      ReferenceID: ref,
+      TransactionType: "Asset Revaluation",
+      Description: `${animal.Name || id} → ${phase}: livestock asset value ${up ? "increased to" : "reduced to"} ₹${value.toLocaleString("en-IN")}`,
+    });
+    return true;
+  };
+
+  /**
+   * Forget a deleted animal completely. Its revaluation rows are DERIVED from
+   * its phase exactly as reminders are derived from records, so they leave with
+   * it and the Livestock balance returns to what it was before the animal
+   * existed. Nothing is booked in reverse — that would leave a compensating pair
+   * behind, the thing that went wrong the last time. Idempotent. The tag is
+   * remembered so a sweep already in flight cannot book for it.
+   */
+  const forgetValuation = async (animalId) => {
+    if (!animalId || typeof animalId !== "string") return 0;
+    dropped.add(animalId);
+    const journal = await JF.Store.journal.list();
+    const mine = journal.filter((j) => j.ReferenceID && String(j.ReferenceID).startsWith(`PHASE-REVAL-${animalId}-`));
+    let n = 0;
+    for (const row of mine) {
+      try { await JF.Store.journal.delete(row.id); n++; } catch (e) { console.warn("[Cascade:forgetValuation]", animalId, e.message); }
+    }
+    return n;
+  };
+
   // A deleted animal takes its derived asset row with it, so the Livestock
   // balance never carries the value of an animal that no longer exists.
-  on("animals:deleted", (a) => JF.PhaseEngine?.forgetAnimal(a?.AnimalID || (typeof a === "string" ? a : a?.id)));
+  on("animals:deleted", (a) => forgetValuation(a?.AnimalID || (typeof a === "string" ? a : a?.id)));
 
   // (3) ACCOUNTING double-entry journal creation.
   // Every department that spends or earns money posts through post() below, so
@@ -278,5 +342,5 @@ JF.Cascade = (function () {
   const suspend = () => { suspended = true; };
   const resume = () => { suspended = false; };
   const isSuspended = () => suspended;
-  return { publish, subscribe, on, init, fire, post, syncLedger, makeJournal, suspend, resume, isSuspended };
+  return { publish, subscribe, on, init, fire, post, syncLedger, bookValuation, forgetValuation, makeJournal, suspend, resume, isSuspended };
 })();

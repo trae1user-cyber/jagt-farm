@@ -14,10 +14,12 @@ window.JF = window.JF || {};
  *   app already speaks (Calf/Heifer/Pregnant/Lactating/Dry/Open/...); Category
  *   follows the phase so lists and filters agree.
  *
- * ASSET VALUES (the farm's fixed schedule, written to the journal automatically):
+ * ASSET VALUES (the farm's fixed schedule, booked to the ledger automatically):
  *   calf / young stock ₹40,000 · pregnant heifer ₹70,000 · lactating or dry cow ₹1,50,000
- *   A revaluation journal entry (Dr Livestock · Cr/Ld Owner Capital) is posted
- *   whenever an animal's phase value changes — idempotent, one row per change.
+ *   This module decides the VALUE; it does not write the journal. It asks
+ *   JF.Cascade.bookValuation() whenever the value changes and CascadeEngine —
+ *   which owns every journal row in the app — posts the revaluation
+ *   (Dr Livestock · Cr/Ld Owner Capital), idempotent, one row per change.
  *   The value is DERIVED from the phase, never typed in: PhaseEngine is its only
  *   writer, every other screen just reads animal.AssetValue.
  *
@@ -47,11 +49,13 @@ JF.PhaseEngine = (function () {
 
     // Records may point at this animal by AnimalID, by name the farmer typed, or
     // by tag — match on any alias so a calving logged against "dabbi" still
-    // makes her a Cow instead of leaving her showing as a Heifer.
+    // makes her a Cow instead of leaving her showing as a Heifer. The matching
+    // policy itself lives in JF.Utils.recordBelongsTo (the reminder engine uses
+    // the same one); what is IN scope here is deliberately narrower — a calf's
+    // own calving row names her as CalfID, and counting that would make every
+    // calf a Cow on her first birthday.
     const mine = (list, idKey) => (list || []).filter((r) =>
-      JF.Utils.sameAnimal(a, r[idKey]) ||
-      (idKey !== "MotherID" && JF.Utils.sameAnimal(a, r.MotherID)) ||
-      (idKey !== "FatherID" && JF.Utils.sameAnimal(a, r.FatherID)));
+      JF.Utils.recordBelongsTo(r, a, { idKey, also: ["MotherID", "FatherID"] }));
 
     const calvings = mine(d.calving, "AnimalID").map((c) => c.Date || c.CalvingDate).filter(Boolean).sort(byDate);
     const parity = calvings.length;
@@ -87,40 +91,6 @@ JF.PhaseEngine = (function () {
     }
     const phase = ageDays < 180 ? "Calf" : "Heifer";
     return { phase, status: ageDays < 180 ? "Calf" : "Open", value: phaseValue(phase), reason: `${ageDays}d old` };
-  };
-
-  /**
-   * Keep the Livestock asset for this animal EQUAL to the phase value. The
-   * delta posted = phase value − what the JOURNAL already carries for this
-   * animal, i.e. its own prior revaluation rows. Booked is read from the ledger
-   * and never from animal.PurchasePrice: a price the farmer typed is not a
-   * rupee in the ledger until something posts it, and counting it as booked
-   * made every purchased animal post a write-down that the next sweep had to
-   * reverse — the pair cancelled out and the ledger drifted away from the
-   * profile. Each Calf→Preg Heifer→Cow step-up still posts only its step.
-   */
-  const postRevaluation = async (animal, value, phase) => {
-    const id = animal.AnimalID || animal.id;
-    const journal = await JF.Store.journal.list();
-    const mine = journal.filter((j) => j.ReferenceID && String(j.ReferenceID).startsWith(`PHASE-REVAL-${id}-`));
-    const booked = mine.reduce((s, j) => s + (j.CreditAccount === "Livestock" ? -Number(j.Amount || 0) : Number(j.Amount || 0)), 0);
-    const delta = Math.round(value - booked);
-    if (Math.abs(delta) < 1) return false;
-    const ref = `PHASE-REVAL-${id}-${mine.length + 1}-${String(phase).replace(/\s+/g, "")}`;
-    if (mine.some((j) => j.ReferenceID === ref)) return false; // already posted
-    const up = delta > 0; // up: Dr Livestock / Cr Owner Capital; down: reversed
-    await JF.Store.journal.create({
-      JournalID: `JNL-${JF.Utils.uid("j")}`,
-      Date: todayISO(),
-      DebitAccount: up ? "Livestock" : "Owner Capital",
-      CreditAccount: up ? "Owner Capital" : "Livestock",
-      Amount: Math.abs(delta),
-      AnimalID: id,
-      ReferenceID: ref,
-      TransactionType: "Asset Revaluation",
-      Description: `${animal.Name || id} → ${phase}: livestock asset value ${up ? "increased to" : "reduced to"} ₹${value.toLocaleString("en-IN")}`,
-    });
-    return true;
   };
 
   /**
@@ -164,30 +134,6 @@ JF.PhaseEngine = (function () {
     return fixed;
   };
 
-  /** Animals deleted in this session: never re-valued, never re-posted. */
-  const dropped = new Set();
-
-  /**
-   * Forget a deleted animal completely. Its PHASE-REVAL rows are DERIVED from
-   * its phase exactly as reminders are derived from records, so they leave with
-   * it and the Livestock balance returns to what it was before the animal
-   * existed. Posting a mirror row instead would leave a compensating pair
-   * behind - the thing that went wrong the last time. Idempotent: nothing to
-   * remove is a no-op. The id is remembered so a sweep already in flight cannot
-   * post for an animal that has just been deleted.
-   */
-  const forgetAnimal = async (animalId) => {
-    if (!animalId || typeof animalId !== "string") return 0;
-    dropped.add(animalId);
-    const journal = await JF.Store.journal.list();
-    const mine = journal.filter((j) => j.ReferenceID && String(j.ReferenceID).startsWith(`PHASE-REVAL-${animalId}-`));
-    let n = 0;
-    for (const row of mine) {
-      try { await JF.Store.journal.delete(row.id); n++; } catch (e) { console.warn("[PhaseEngine:forget]", animalId, e.message); }
-    }
-    return n;
-  };
-
   /**
    * Sync phases (and asset values) for the whole herd. Returns change count.
    * Only one pass runs at a time: two overlapping passes would each read the
@@ -210,8 +156,6 @@ JF.PhaseEngine = (function () {
     let changes = await linkRelationships(d);
     for (const a of d.animals) {
       try {
-        const animalId = a.AnimalID || a.id;
-        if (dropped.has(animalId)) continue; // deleted while this pass was running
         const { phase, status, value, reason } = phaseOf(a, d);
         const patch = {};
         if (phase && a.Category !== phase && !["Sold", "Deceased"].includes(a.CurrentStatus)) patch.Category = phase;
@@ -227,7 +171,7 @@ JF.PhaseEngine = (function () {
           console.info(`[PhaseEngine] ${a.AnimalID}: ${a.Category || "?"}/${a.CurrentStatus} → ${patch.Category || phase}${patch.CurrentStatus ? "/" + patch.CurrentStatus : ""} (${reason})`);
         }
         if (value != null && phase !== "Sold" && phase !== "Deceased") {
-          if (await postRevaluation(a, value, phase)) changes++;
+          if (await JF.Cascade.bookValuation(a, value, phase)) changes++;
         }
       } catch (e) { console.warn("[PhaseEngine]", a.AnimalID, e.message); }
     }
@@ -242,5 +186,5 @@ JF.PhaseEngine = (function () {
     setTimeout(() => syncAll().catch(() => {}), 1200); // boot pass (after LifeCycle's promotions)
   };
 
-  return { phaseOf, syncAll, linkRelationships, forgetAnimal, VALUES, init };
+  return { phaseOf, syncAll, linkRelationships, VALUES, init };
 })();
